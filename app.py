@@ -43,6 +43,7 @@ def load_df(path):
     df = df.rename(columns=ren)
     for col in ["lat","lon","radius_m"]:
         df[col] = pd.to_numeric(df[col].replace("ND", None), errors="coerce")
+    df["n_sources"] = pd.to_numeric(df.get("n_sources", 1), errors="coerce").fillna(1).astype(int)
     for col in ["feature","locality","region","thickness","elevation","excavation","deposits",
                 "strat","dating","chrono","pub","doi","comments"]:
         if col not in df: df[col] = "ND"
@@ -74,6 +75,8 @@ f_region = sb.multiselect("Регион", regions, default=regions)
 f_dep    = sb.multiselect("Тип отложений", dep_tokens, default=dep_tokens)
 f_src    = sb.multiselect("Источник", SRC_TOKENS, default=SRC_TOKENS)
 f_rad    = sb.multiselect("Радиус точности, м", radii, default=radii)
+f_minsrc = sb.slider("Мин. источников (надёжность)", 1, int(df["n_sources"].max()), 1,
+                     help="Разрезы, подтверждённые несколькими публикациями, надёжнее. Подними до 2+ чтобы убрать single-source шум.")
 only_geo = sb.checkbox("Только с координатами (для карты)", value=True)
 color_by = sb.selectbox("Раскрасить по", ["source","region","deposits","strat"],
                         format_func={"source":"Источник","region":"Регион","deposits":"Тип отложений","strat":"Стратиграфия"}.get)
@@ -82,6 +85,7 @@ m = df["region"].isin(f_region)
 m &= df["src_list"].apply(lambda lst: any(s in f_src for s in lst))
 m &= df["deposits"].apply(lambda v: any(t.strip() in f_dep for t in str(v).split(";")) or str(v).strip()=="ND")
 m &= (df["radius_m"].isin(f_rad) | df["radius_m"].isna())
+m &= (df["n_sources"] >= f_minsrc)
 fdf = df[m].copy()
 cmap = color_map(fdf[color_by].fillna("ND").astype(str))
 fdf["color"] = fdf[color_by].fillna("ND").astype(str).map(cmap)
