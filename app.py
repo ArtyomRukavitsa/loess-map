@@ -98,21 +98,10 @@ with tab_map:
     st.write(f"На карте: **{len(geo)}** точек (из {len(fdf)} отфильтрованных; без координат — {len(fdf)-len(geo)}). "
              "**Наведи** на точку — подсказка; **выбери разрез справа** — полная карточка.")
     if len(geo):
-        geo["r"] = geo["radius_m"].fillna(2000)
         mcol, dcol = st.columns([3, 1.5])
         with mcol:
-            circles = pdk.Layer("ScatterplotLayer", geo, id="circles", get_position=["lon","lat"], get_radius="r",
-                                get_fill_color="[color[0],color[1],color[2],55]", get_line_color="[color[0],color[1],color[2]]",
-                                line_width_min_pixels=1, stroked=True, filled=True, pickable=True, auto_highlight=True)
-            dots = pdk.Layer("ScatterplotLayer", geo, id="points", get_position=["lon","lat"], get_radius=3500,
-                             radius_min_pixels=9, radius_max_pixels=16, get_fill_color="[color[0],color[1],color[2]]",
-                             pickable=True, auto_highlight=True)
-            view = pdk.ViewState(latitude=float(geo["lat"].mean()), longitude=float(geo["lon"].mean()), zoom=4)
-            tooltip = {"html": "<b>{feature}</b><br/>{locality}",
-                       "style": {"backgroundColor": "#333", "color": "white", "font-size": "12px"}}
-            st.pydeck_chart(
-                pdk.Deck(layers=[circles, dots], initial_view_state=view, tooltip=tooltip,
-                         map_provider="carto", map_style="light"), use_container_width=True)   # без on_select — стабильно; наведи для подсказки
+            geo["_hex"] = geo["color"].map(lambda c: "#%02x%02x%02x" % (int(c[0]), int(c[1]), int(c[2])))
+            st.map(geo, latitude="lat", longitude="lon", color="_hex", size=2500)   # st.map стабильна (pydeck сегфолтил на облаке)
         with dcol:
             labels = [f"{r['feature']} ({r['region']})"[:60] for _, r in geo.iterrows()]
             idx = st.selectbox("Разрез — карточка", list(range(len(geo))), format_func=lambda i: labels[i], key="pick")
