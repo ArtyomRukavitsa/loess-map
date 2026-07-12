@@ -96,7 +96,7 @@ tab_map, tab_tbl, tab_stat = st.tabs(["Карта", "Таблица", "Стат�
 with tab_map:
     geo = fdf.dropna(subset=["lat","lon"]).copy()
     st.write(f"На карте: **{len(geo)}** точек (из {len(fdf)} отфильтрованных; без координат — {len(fdf)-len(geo)}). "
-             "**Кликни точку** — справа появится карточка записи.")
+             "**Наведи** на точку — подсказка; **выбери разрез справа** — полная карточка.")
     if len(geo):
         geo["r"] = geo["radius_m"].fillna(2000)
         mcol, dcol = st.columns([3, 1.5])
@@ -110,19 +110,14 @@ with tab_map:
             view = pdk.ViewState(latitude=float(geo["lat"].mean()), longitude=float(geo["lon"].mean()), zoom=4)
             tooltip = {"html": "<b>{feature}</b><br/>{locality}",
                        "style": {"backgroundColor": "#333", "color": "white", "font-size": "12px"}}
-            event = st.pydeck_chart(
+            st.pydeck_chart(
                 pdk.Deck(layers=[circles, dots], initial_view_state=view, tooltip=tooltip,
-                         map_provider="carto", map_style="light"),
-                on_select="rerun", selection_mode="single-object", key="map", use_container_width=True)
+                         map_provider="carto", map_style="light"), use_container_width=True)   # без on_select — стабильно; наведи для подсказки
         with dcol:
-            objs = {}
-            try: objs = dict(event.selection["objects"])
-            except Exception:
-                try: objs = dict(event["selection"]["objects"])
-                except Exception: objs = {}
-            sel = next((v for v in objs.values() if v), [])
-            if sel:
-                o = sel[0]
+            labels = [f"{r['feature']} ({r['region']})"[:60] for _, r in geo.iterrows()]
+            idx = st.selectbox("Разрез — карточка", list(range(len(geo))), format_func=lambda i: labels[i], key="pick")
+            if idx is not None:
+                o = geo.iloc[idx].to_dict()
                 def g(k):
                     v = o.get(k, "ND")
                     return "ND" if v in (None, "", "nan") else v
@@ -146,8 +141,6 @@ with tab_map:
                              .rename(columns={"excavation":"Excavation","deposits":"Deposit","strat":"Stratigraphy",
                                               "thickness":"Thick.","elevation":"Elev.","radius_m":"Acc."}),
                              hide_index=True, use_container_width=True)
-            else:
-                st.info("Кликни точку на карте — здесь появится карточка записи.")
     else:
         st.info("Нет точек с координатами под текущие фильтры.")
 
