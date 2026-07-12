@@ -135,8 +135,6 @@ with tab_map:
                         if o2 and "_i" in o2[0]: sel_i = int(o2[0]["_i"]); break
             except Exception:
                 sel_i = None
-            with st.expander("🔧 debug клика (раскрой и пришли, если карточка не появляется)"):
-                st.write({"indices": indices, "objects_keys": list(dict(objects).keys()) if objects else None, "sel_i": sel_i})
             if sel_i is None: sel_i = pick
             if sel_i is None:
                 st.info("**Кликни точку** на карте (или выбери разрез в списке) → здесь появится карточка.")
@@ -144,7 +142,7 @@ with tab_map:
                 o = geo.iloc[sel_i].to_dict()
                 def g(k):
                     v = o.get(k, "ND")
-                    return "ND" if v in (None, "", "nan") else v
+                    return "ND" if v in (None, "", "nan", "None", "none", "NaN") else v
                 fields = [("Coordinates", g("coord")), ("Source records", f"{g('nsrc')} · ID: {g('ID')}"),
                           ("Accuracy radius", g("rad_disp")), ("Thickness / depth", g("thickness")),
                           ("Absolute elevation", g("elevation")), ("Locality", g("locality")),
