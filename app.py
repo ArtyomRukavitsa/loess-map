@@ -98,31 +98,40 @@ with tab_map:
     st.write(f"На карте: **{len(geo)}** точек (из {len(fdf)} отфильтрованных; без координат — {len(fdf)-len(geo)}). "
              "**Наведи** на точку — название; **выбери разрез** — карточка + приближение на карте.")
     if len(geo):
-        geo = geo.reset_index(drop=True); geo["r"] = geo["radius_m"].fillna(2000)
+        geo = geo.reset_index(drop=True); geo["r"] = geo["radius_m"].fillna(2000); geo["_i"] = list(range(len(geo)))
         labels = [f"{r['feature']} ({r['region']})"[:55] for _, r in geo.iterrows()]
-        idx = st.selectbox("🔍 Разрез — карточка + зум на карте", [None] + list(range(len(geo))),
-                           format_func=lambda i: "— обзор: все точки —" if i is None else labels[i], key="pick")
+        pick = st.selectbox("🔍 Найти разрез в списке (приближает на карте)", [None] + list(range(len(geo))),
+                            format_func=lambda i: "— обзор: все точки —" if i is None else labels[i], key="pick")
         mcol, dcol = st.columns([3, 1.5])
         with mcol:
             circles = pdk.Layer("ScatterplotLayer", geo, get_position=["lon", "lat"], get_radius="r",
                                 get_fill_color="[color[0],color[1],color[2],70]", get_line_color="[color[0],color[1],color[2]]",
                                 line_width_min_pixels=1, stroked=True, filled=True, pickable=True, auto_highlight=True)
             layers = [circles]
-            if idx is None:
+            if pick is None:
                 view = pdk.ViewState(latitude=float(geo["lat"].mean()), longitude=float(geo["lon"].mean()), zoom=3.3)
             else:
-                s = geo.iloc[idx]
+                s = geo.iloc[pick]
                 view = pdk.ViewState(latitude=float(s["lat"]), longitude=float(s["lon"]), zoom=7)
-                layers.append(pdk.Layer("ScatterplotLayer", geo.iloc[[idx]], get_position=["lon", "lat"], get_radius=7000,
+                layers.append(pdk.Layer("ScatterplotLayer", geo.iloc[[pick]], get_position=["lon", "lat"], get_radius=7000,
                               get_fill_color="[255,20,20,200]", stroked=True, get_line_color="[120,0,0]", line_width_min_pixels=2, pickable=True))
             tooltip = {"html": "<b>{feature}</b><br/>{locality}", "style": {"backgroundColor": "#333", "color": "#fff", "font-size": "12px"}}
-            st.pydeck_chart(pdk.Deck(layers=layers, initial_view_state=view, tooltip=tooltip,
-                            map_provider="carto", map_style="light"), use_container_width=True)
+            ev = st.pydeck_chart(pdk.Deck(layers=layers, initial_view_state=view, tooltip=tooltip,
+                                 map_provider="carto", map_style="light"),
+                                 on_select="rerun", selection_mode="single-object", key="mapsel", use_container_width=True)
         with dcol:
-            if idx is None:
-                st.info("Выбери разрез в списке выше → карточка + приближение. Наведи на точку — название.")
+            sel_i = None                                          # клик по точке приоритетнее списка
+            for src in (getattr(ev, "selection", None), ev if isinstance(ev, dict) else None):
+                try:
+                    for lo in dict(src["objects"]).values():
+                        if lo: sel_i = int(lo[0]["_i"]); break
+                except Exception: pass
+                if sel_i is not None: break
+            if sel_i is None: sel_i = pick
+            if sel_i is None:
+                st.info("**Кликни точку** на карте (или выбери разрез в списке) → здесь появится карточка.")
             else:
-                o = geo.iloc[idx].to_dict()
+                o = geo.iloc[sel_i].to_dict()
                 def g(k):
                     v = o.get(k, "ND")
                     return "ND" if v in (None, "", "nan") else v
