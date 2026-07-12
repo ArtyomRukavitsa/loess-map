@@ -104,7 +104,7 @@ with tab_map:
                             format_func=lambda i: "— обзор: все точки —" if i is None else labels[i], key="pick")
         mcol, dcol = st.columns([3, 1.5])
         with mcol:
-            circles = pdk.Layer("ScatterplotLayer", geo, get_position=["lon", "lat"], get_radius="r",
+            circles = pdk.Layer("ScatterplotLayer", geo, id="pts", get_position=["lon", "lat"], get_radius="r",
                                 get_fill_color="[color[0],color[1],color[2],70]", get_line_color="[color[0],color[1],color[2]]",
                                 line_width_min_pixels=1, stroked=True, filled=True, pickable=True, auto_highlight=True)
             layers = [circles]
@@ -113,20 +113,30 @@ with tab_map:
             else:
                 s = geo.iloc[pick]
                 view = pdk.ViewState(latitude=float(s["lat"]), longitude=float(s["lon"]), zoom=7)
-                layers.append(pdk.Layer("ScatterplotLayer", geo.iloc[[pick]], get_position=["lon", "lat"], get_radius=7000,
-                              get_fill_color="[255,20,20,200]", stroked=True, get_line_color="[120,0,0]", line_width_min_pixels=2, pickable=True))
+                layers.append(pdk.Layer("ScatterplotLayer", geo.iloc[[pick]], id="hl", get_position=["lon", "lat"], get_radius=7000,
+                              get_fill_color="[255,20,20,200]", stroked=True, get_line_color="[120,0,0]", line_width_min_pixels=2, pickable=False))
             tooltip = {"html": "<b>{feature}</b><br/>{locality}", "style": {"backgroundColor": "#333", "color": "#fff", "font-size": "12px"}}
             ev = st.pydeck_chart(pdk.Deck(layers=layers, initial_view_state=view, tooltip=tooltip,
                                  map_provider="carto", map_style="light"),
                                  on_select="rerun", selection_mode="single-object", key="mapsel", use_container_width=True)
         with dcol:
             sel_i = None                                          # клик по точке приоритетнее списка
-            for src in (getattr(ev, "selection", None), ev if isinstance(ev, dict) else None):
-                try:
-                    for lo in dict(src["objects"]).values():
-                        if lo: sel_i = int(lo[0]["_i"]); break
-                except Exception: pass
-                if sel_i is not None: break
+            selraw = getattr(ev, "selection", None)
+            try: indices = selraw["indices"]
+            except Exception: indices = getattr(selraw, "indices", None)
+            try: objects = selraw["objects"]
+            except Exception: objects = getattr(selraw, "objects", None)
+            try:
+                lst = dict(indices or {}).get("pts") or []
+                if lst:
+                    sel_i = int(lst[0])
+                elif objects:
+                    for o2 in dict(objects).values():
+                        if o2 and "_i" in o2[0]: sel_i = int(o2[0]["_i"]); break
+            except Exception:
+                sel_i = None
+            with st.expander("🔧 debug клика (раскрой и пришли, если карточка не появляется)"):
+                st.write({"indices": indices, "objects_keys": list(dict(objects).keys()) if objects else None, "sel_i": sel_i})
             if sel_i is None: sel_i = pick
             if sel_i is None:
                 st.info("**Кликни точку** на карте (или выбери разрез в списке) → здесь появится карточка.")
