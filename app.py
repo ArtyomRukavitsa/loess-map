@@ -9,7 +9,7 @@ import streamlit as st
 import pydeck as pdk
 
 HERE = pathlib.Path(__file__).parent
-XLSX = HERE / "results.xlsx"
+XLSX = HERE / "results.csv"                                   # CSV быстрее xlsx, только геокодированные (2112)
 
 PALETTE = [[31,119,180],[255,127,14],[44,160,44],[214,39,40],[148,103,189],[140,86,75],
            [227,119,194],[127,127,127],[188,189,34],[23,190,207],[174,199,232],[255,187,120]]
@@ -20,10 +20,7 @@ def sources_of(comment):
 
 @st.cache_data
 def load_df(path):
-    import openpyxl
-    wb = openpyxl.load_workbook(path, data_only=True); ws = wb["base"]
-    rows = list(ws.iter_rows(values_only=True))
-    df = pd.DataFrame(rows[1:], columns=list(rows[0]))
+    df = pd.read_csv(path, dtype=str, keep_default_na=False)  # быстрый парс; строки, числа приведём ниже
     ren = {}
     for c in df.columns:
         cl = str(c).lower()
