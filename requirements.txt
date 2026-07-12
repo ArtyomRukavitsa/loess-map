@@ -1,4 +1,2 @@
-streamlit>=1.40
+streamlit==1.47.0
 pandas>=2.0
-pydeck>=0.9
-openpyxl>=3.1

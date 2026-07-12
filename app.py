@@ -6,7 +6,6 @@ Streamlit-карта по единому датасету (results.xlsx).
 import re, pathlib
 import pandas as pd
 import streamlit as st
-import pydeck as pdk
 
 HERE = pathlib.Path(__file__).parent
 XLSX = HERE / "results.csv"                                   # CSV быстрее xlsx, только геокодированные (2112)
