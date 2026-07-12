@@ -20,7 +20,7 @@ def sources_of(comment):
 
 @st.cache_data
 def load_df(path):
-    df = pd.read_csv(path, dtype=str, keep_default_na=False)  # быстрый парс; строки, числа приведём ниже
+    df = pd.read_csv(path, dtype=str, keep_default_na=False, encoding="utf-8-sig", on_bad_lines="skip")  # быстрый устойчивый парс
     ren = {}
     for c in df.columns:
         cl = str(c).lower()
@@ -75,7 +75,8 @@ f_region = sb.multiselect("Регион", regions, default=regions)
 f_dep    = sb.multiselect("Тип отложений", dep_tokens, default=dep_tokens)
 f_src    = sb.multiselect("Источник", SRC_TOKENS, default=SRC_TOKENS)
 f_rad    = sb.multiselect("Радиус точности, м", radii, default=radii)
-f_minsrc = sb.slider("Мин. источников (надёжность)", 1, int(df["n_sources"].max()), 1,
+_maxsrc = max(2, int(df["n_sources"].max()) if len(df) else 2)
+f_minsrc = sb.slider("Мин. источников (надёжность)", 1, _maxsrc, 1,
                      help="Разрезы, подтверждённые несколькими публикациями, надёжнее. Подними до 2+ чтобы убрать single-source шум.")
 only_geo = sb.checkbox("Только с координатами (для карты)", value=True)
 color_by = sb.selectbox("Раскрасить по", ["source","region","deposits","strat"],
