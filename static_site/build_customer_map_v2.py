@@ -381,6 +381,59 @@ html = patch(html,
     '''      <div class="popup-key">Thickness / depth</div><div>${thicknessText}</div>''',
     '''      <div class="popup-key">Thickness / depth</div><div>${[["studied",m.thStudied],["visible",m.thVisible],["borehole",m.thBorehole],["general",m.thUnspec]].filter(x=>x[1]&&x[1]!="ND").map(x=>`${x[0]}: ${escapeHtml(x[1])} m`).join("<br>") || thicknessText}</div>''')
 
+# === ВЕРИФИКАЦИЯ (ручная проверка данных) — кнопки в карточке + вызов Cloud Function fn_verify ===
+# VERIFY_API пустой -> фоллбэк на localStorage (демо). Заполнить URL функции после её деплоя.
+VERIFY_API_URL = os.environ.get("VERIFY_API", "")   # можно задать через env при сборке
+VERIFY_JS = '''const VERIFY_API = "__VERIFY_API__";
+function _vfKey(sid){ return "verify_" + sid; }
+async function loadVerify(sid){
+  let list = [];
+  try {
+    if (VERIFY_API) { const r = await fetch(VERIFY_API + "?section_id=" + encodeURIComponent(sid)); list = (await r.json()).corrections || []; }
+    else { list = JSON.parse(localStorage.getItem(_vfKey(sid)) || "[]"); }
+  } catch(e) {}
+  const el = document.getElementById("vf-list");
+  if (el) el.innerHTML = list.length
+    ? ("<b>Проверки (" + list.length + "):</b><br>" + list.map(c => "• " + escapeHtml(c.field) + ": <b>" + escapeHtml(c.verdict) + "</b>" + (c.comment ? " — " + escapeHtml(c.comment) : "")).join("<br>"))
+    : "<span class='subtle'>проверок пока нет</span>";
+}
+async function submitVerify(sid, verdict){
+  const field = (document.getElementById("vf-field") || {}).value || "overall";
+  const comment = (document.getElementById("vf-comment") || {}).value || "";
+  const rec = { section_id: sid, field: field, verdict: verdict, comment: comment };
+  try {
+    if (VERIFY_API) { await fetch(VERIFY_API, { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(rec) }); }
+    else { const k = _vfKey(sid), cur = JSON.parse(localStorage.getItem(k) || "[]"); cur.push(Object.assign({ ts: Math.floor(Date.now()/1000) }, rec)); localStorage.setItem(k, JSON.stringify(cur)); }
+    const ci = document.getElementById("vf-comment"); if (ci) ci.value = "";
+    loadVerify(sid);
+  } catch(e) { alert("Не удалось сохранить: " + e); }
+}
+function vfBlock(sid){
+  const s = escapeHtml(sid);
+  return `<div style="margin-top:12px;border-top:1px solid #e5e7eb;padding-top:10px">
+    <b>\\u2714 Проверка данных</b>
+    <select id="vf-field" style="width:100%;margin:6px 0;padding:5px;border:1px solid #d1d5db;border-radius:6px">
+      <option value="overall">Разрез в целом</option>
+      <option value="location">Координаты/локация</option>
+      <option value="deposit">Тип отложений</option>
+      <option value="thickness">Мощность</option>
+      <option value="elevation">Высота</option>
+      <option value="dating">Датирование</option>
+    </select>
+    <div style="display:flex;gap:5px;margin-bottom:5px">
+      <button onclick="submitVerify('${s}','correct')" style="flex:1;background:#dcfce7;border:1px solid #86efac;border-radius:6px;padding:5px;cursor:pointer">\\u2713 верно</button>
+      <button onclick="submitVerify('${s}','partial')" style="flex:1;background:#fef9c3;border:1px solid #fde047;border-radius:6px;padding:5px;cursor:pointer">~ частично</button>
+      <button onclick="submitVerify('${s}','incorrect')" style="flex:1;background:#fee2e2;border:1px solid #fca5a5;border-radius:6px;padding:5px;cursor:pointer">\\u2717 неверно</button>
+    </div>
+    <input id="vf-comment" placeholder="комментарий" style="width:100%;padding:5px;border:1px solid #d1d5db;border-radius:6px">
+    <div id="vf-list" style="margin-top:7px;font-size:12px"></div>
+  </div>`;
+}
+function showPopup(m, coordinate) {'''.replace("__VERIFY_API__", VERIFY_API_URL)
+html = patch(html, 'function showPopup(m, coordinate) {', VERIFY_JS)
+html = patch(html, 'overlay.setPosition(coordinate);',
+             'overlay.setPosition(coordinate);\n  popupContent.innerHTML += vfBlock(m.markerId);\n  loadVerify(m.markerId);')
+
 open(os.path.join(HERE, "index.html"), "w", encoding="utf-8").write(html)
 kb = len(html.encode("utf-8")) / 1024
 print(f"index.html (дизайн заказчика): маркеров {len(DATA)}, записей {rid}, дублей-групп {dup}, {kb:.0f} КБ")
