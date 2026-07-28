@@ -1,0 +1,7 @@
+# Конвейер извлечения. Python 3.9+
+boto3            # Yandex Object Storage (S3-совместимое)
+openpyxl         # чтение/запись xlsx
+PyMuPDF          # рендер PDF-страниц (fitz) для даунсэмплинга перед OCR
+img2pdf          # сборка сжатых изображений в PDF для OCR
+Pillow           # обработка/сжатие фотографий страниц
+python-docx      # генерация Word-документации поставки

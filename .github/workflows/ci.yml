@@ -1,0 +1,30 @@
+name: CI
+
+# Проверка кода на каждый пуш и PR: стиль, синтаксис, сборка Docker-образа.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install tools
+        run: pip install black
+      - name: Black (проверка стиля, не блокирует)
+        run: black --check --diff pipeline static_site || true
+      - name: Syntax check (py_compile всех скриптов)
+        run: python -m py_compile pipeline/*.py static_site/*.py
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image (воспроизводимость среды)
+        run: docker build -t loess-atlas:ci .

@@ -5,3 +5,13 @@ __pycache__/
 .streamlit/secrets.toml
 .DS_Store
 _*.txt
+
+# большие данные/кэши конвейера — генерируются, не храним в репо
+*.xlsx
+arch_local*/
+geocache*.json
+dem_elevation.json
+accuracy_radius.json
+section_evidence.json
+recon_*.json
+*.log
