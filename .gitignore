@@ -15,3 +15,6 @@ accuracy_radius.json
 section_evidence.json
 recon_*.json
 *.log
+
+# страница загрузки собирается локально: содержит адреса публичных функций
+static_site/upload.html

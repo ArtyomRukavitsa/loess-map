@@ -5,11 +5,15 @@ import openpyxl, json, os, sys, math, collections, re
 
 sys.stdout.reconfigure(encoding="utf-8")
 HERE = os.path.dirname(os.path.abspath(__file__))
-TEMPLATE = r"C:\Users\rukav\Downloads\Telegram Desktop\loess_interactive_map_v6_accuracy_circles.html"
-SRC = os.path.join(HERE, "..", "loess_pipeline", "records_clean_geo_v2.xlsx")
-EVF = os.path.join(HERE, "..", "loess_pipeline", "section_evidence.json")
+# Каталоги задаются через окружение — тогда один и тот же сборщик работает локально и в облачной функции
+# (там данные скачиваются во временную папку). По умолчанию — обычная раскладка проекта.
+DATA_DIR = os.environ.get("DATA_DIR", os.path.join(HERE, "..", "loess_pipeline"))
+OUT_DIR = os.environ.get("OUT_DIR", HERE)
+TEMPLATE = os.environ.get("TEMPLATE", os.path.join(HERE, "template_customer_map.html"))
+SRC = os.environ.get("SRC_XLSX", os.path.join(DATA_DIR, "records_clean_geo_v2.xlsx"))
+EVF = os.path.join(DATA_DIR, "section_evidence.json")
 EV = json.load(open(EVF, encoding="utf-8")) if os.path.exists(EVF) else {}  # {locality_lower: {dep:[фразы], grounded}}
-DEMF = os.path.join(HERE, "..", "loess_pipeline", "dem_elevation.json")
+DEMF = os.path.join(DATA_DIR, "dem_elevation.json")
 _dem = json.load(open(DEMF, encoding="utf-8")) if os.path.exists(DEMF) else {}
 DEM = {}  # {(lat5,lon5): elev} — расчётная высота по цифровой модели рельефа
 for _k, _v in _dem.items():
@@ -17,7 +21,7 @@ for _k, _v in _dem.items():
         _la, _lo = _k.split(","); DEM[(round(float(_la), 5), round(float(_lo), 5))] = _v
     except Exception:
         pass
-ACCF = os.path.join(HERE, "..", "loess_pipeline", "accuracy_radius.json")
+ACCF = os.path.join(DATA_DIR, "accuracy_radius.json")
 _acc = json.load(open(ACCF, encoding="utf-8")) if os.path.exists(ACCF) else {}
 ACC = {}  # {(lat5,lon5): radius_m} — радиус точности по типу объекта (село/город/регион)
 for _k, _v in _acc.items():
@@ -25,6 +29,44 @@ for _k, _v in _acc.items():
         _la, _lo = _k.split(","); ACC[(round(float(_la), 5), round(float(_lo), 5))] = _v
     except Exception:
         pass
+PLF = os.path.join(DATA_DIR, "page_links_v2.json")
+PAGELINKS = json.load(open(PLF, encoding="utf-8")) if os.path.exists(PLF) else {}  # {"lat,lon": [{src,pages,approx}]}
+SCF = os.path.join(DATA_DIR, "scan_index.json")
+SCANIDX = json.load(open(SCF, encoding="utf-8")) if os.path.exists(SCF) else {}    # {публикация: {страница: ключ}}
+
+import re as _re
+UPLOAD_MARK = _re.compile(r"\s*\(загружено пользователем\)\s*$", _re.I)
+
+def scan_slug(name):                       # тот же slug, что у 60_render_scans.py
+    import hashlib
+    base = _re.sub(r"[^0-9A-Za-zА-Яа-яЁё]+", "_", name.rsplit(".", 1)[0]).strip("_")[:52]
+    return f"{base}_{hashlib.md5(name.encode('utf-8')).hexdigest()[:6]}"
+
+# «борисоглебский лёсс», «армавирская свита» — названия подразделений, образованные от топонимов
+UNIT_RE = _re.compile(r"([А-ЯЁ][а-яё]+ск)(?:ий|ая|ое|ого|ой|ом|ую)\s+"
+                      r"(?:лесс|лёсс|свит|горизонт|почв|толщ|слои)", _re.I)
+
+def _stem(s):
+    s = str(s or "").lower().replace("ё", "е")
+    for suf in ("ский", "ская", "ское", "ского", "ской", "ском", "ий", "ая", "ое", "а", "ы", "и"):
+        if s.endswith(suf): return s[:-len(suf)]
+    return s
+
+def _same_stem(title, unit):
+    a, b = _stem(title), _stem(unit)
+    return len(a) >= 5 and len(b) >= 5 and (a[:6] == b[:6])
+
+def with_scans(lst):                       # к привязке страниц добавляем те, для которых есть отрендеренный скан
+    out = []
+    for e in lst:
+        d = dict(e)
+        src = UPLOAD_MARK.sub("", e["src"])         # в индексе сканов имя без пометки загрузки
+        have = SCANIDX.get(src, {})
+        sp = [p for p in e["pages"] if str(p) in have]
+        if sp:
+            d["scanSlug"] = scan_slug(src); d["scanPages"] = sp
+        out.append(d)
+    return out
 
 
 def acc_bin(a):                               # бины точности как в шаблоне заказчика
@@ -157,6 +199,7 @@ for r in list(ws.values)[1:]:
     geomp = str(r[C["geomorphic_position"]] or "ND").strip() or "ND"
     chrono = "Yes" if dat else "No"
     pubs = [s.strip() for s in str(r[C["sources"]] or "").split("|") if s.strip()]
+    evs = [e.strip() for e in str(r[C["evidence"]] or "").split("||") if e.strip()]   # v2: фразы-основания самой записи
     feat = f"{loc}, {adm}" if adm != "ND" else loc
     rec = {
         "id": str(rid), "lat": lat, "lon": lon,
@@ -164,7 +207,7 @@ for r in list(ws.values)[1:]:
         "thickness": thmax if thmax is not None else thmin,
         "elevation": elmax if elmax is not None else elmin,
         "typeExcavationRaw": exc, "typeExcavationTags": exc_tags,
-        "geomModern": "ND", "geomPosition": geomp,
+        "geomModern": "ND", "geomPosition": geomp, "evidence": evs,
         "rawTerms": raw, "sourceKinds": srck,
         "thStudied": th_studied, "thVisible": th_visible, "thBorehole": th_borehole, "thUnspec": th_unspec,
         "featureName": feat, "locality": loc, "admin": adm,
@@ -173,6 +216,7 @@ for r in list(ws.values)[1:]:
         "chronoRaw": "true" if chrono == "Yes" else "false", "chrono": chrono,
         "datingRaw": "; ".join(dat) if dat else "ND", "datingTags": dat or ["ND"],
         "nMag": 0, "nC14": 0, "nOSL": 0, "nTL": 0, "nUThHe": 0,
+        "pubs": pubs,
         "publication1": pubs[0] if pubs else "ND", "doi1": "ND",
         "principalInvestigator": "ND", "comments": "",
         "contributor": "auto-extraction (loess pipeline)",
@@ -237,6 +281,15 @@ for (lat, lon), recs in groups.items():
                 if p not in mev and len(mev) < 3:
                     mev.append(p)
             mgrounded = mgrounded or e["grounded"]
+    # v2: все фразы-основания самих записей (коллеги: трёх коротких фрагментов не хватает для проверки)
+    mev_all = list(dict.fromkeys([p for r in recs for p in r["evidence"]]))
+    mev_all += [p for p in mev if p not in mev_all]                # добить обоснованиями по типу отложений
+    mev_all = mev_all[:14]
+    # Замечание геолога: многие стратиграфические подразделения названы по населённым пунктам
+    # («борисоглебский лёсс»), и упоминание такого названия ещё не значит, что там описан разрез.
+    # Помечаем случай, когда имя объекта совпадает с названием подразделения — решает проверяющий.
+    _unit = UNIT_RE.search(" ".join(mev_all))
+    unit_warn = bool(_unit) and _same_stem(localities[0] if localities else "", _unit.group(1))
     loc_unc = any(r.get("_locconf") == "uncertain" for r in recs)  # надёжность ЛОКАЦИИ (отдельная ось)
     maxNsrc = max((r.get("_nsrc", 1) for r in recs), default=1)
     # Data confidence — уверенность РАСПОЗНАВАНИЯ типа отложений (не путать с локацией), просьба коллег п.2
@@ -265,9 +318,14 @@ for (lat, lon), recs in groups.items():
         "markerId": f"{lat},{lon}", "lat": lat, "lon": lon,
         "title": localities[0] if localities else features[0],
         "ids": [r["id"] for r in recs], "sourceCount": len(recs),
-        "records": [{"id": r["id"], "typeExcavationRaw": r["typeExcavationRaw"],  # только поля, что читает попап-таблица
+        # Разбивка по источникам (просьба геолога: один разрез описан в разных статьях, и данные
+        # из них смешивать нельзя). Поэтому у каждой записи храним её публикации и типы мощности.
+        "records": [{"id": r["id"], "typeExcavationRaw": r["typeExcavationRaw"],
                      "depositRaw": r["depositRaw"], "stratRaw": r["stratRaw"],
-                     "thickness": r["thickness"], "elevation": r["elevation"], "accuracy": r["accuracy"]} for r in recs],
+                     "thickness": r["thickness"], "elevation": r["elevation"], "accuracy": r["accuracy"],
+                     "pubs": r["pubs"], "datingRaw": r["datingRaw"], "geomPosition": r["geomPosition"],
+                     "thStudied": r["thStudied"], "thVisible": r["thVisible"],
+                     "thBorehole": r["thBorehole"], "thUnspec": r["thUnspec"]} for r in recs],
         "typeExcavation": excT, "depositType": dep or ["ND"],
         "stratigraphicPosition": strat or ["ND"], "datingMethod": dat or ["ND"],
         "chronologicalData": chrono or ["No"],
@@ -281,10 +339,11 @@ for (lat, lon), recs in groups.items():
         "representativeElevationRange": bin20(mid_el), "representativeThicknessRange": bin5(mid_th),
         "representativeAccuracyRange": acc_bin(maxAcc),
         "searchText": search,
-        "evidence": mev, "grounded": mgrounded,
-        "locUncertain": loc_unc,
+        "evidence": mev_all, "grounded": mgrounded,
+        "locUncertain": loc_unc, "unitWarn": unit_warn,
         "elevDem": DEM.get((round(lat, 5), round(lon, 5))),  # расчётная высота (DEM), если нет опубликованной
         "confidence": conf,
+        "pageLinks": with_scans(PAGELINKS.get(f"{lat},{lon}", [])),  # разрез -> страница (+ссылка на скан)
     }
     DATA.append(m)
     for t in excT: cat["typeExcavation"].add(t)
@@ -339,7 +398,9 @@ def patch(h, old, new):                       # правки шаблона по
 html = patch(html,
     'const baseLayers = {\n  positron: new ol.layer.Tile({\n    visible: true,',
     'const baseLayers = {\n  physical: new ol.layer.Tile({\n    visible: true,\n'
-    '    source: new ol.source.XYZ({ url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Physical_Map/MapServer/tile/{z}/{y}/{x}", attributions: "Tiles &copy; Esri", crossOrigin: "anonymous" })\n  }),\n'
+    # maxZoom: 8 — реальный предел этого слоя Esri; без него вблизи приходят плитки «Map data not yet available»,
+    # а с ним последний доступный уровень просто растягивается (и сверху ложится детальная подложка)
+    '    source: new ol.source.XYZ({ url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Physical_Map/MapServer/tile/{z}/{y}/{x}", maxZoom: 8, attributions: "Tiles &copy; Esri", crossOrigin: "anonymous" })\n  }),\n'
     '  positron: new ol.layer.Tile({\n    visible: false,')
 html = patch(html, 'layers: [baseLayers.positron,', 'layers: [baseLayers.physical, baseLayers.positron,')
 html = patch(html,
@@ -348,6 +409,39 @@ html = patch(html,
 # #5 ранжирование: честный лейбл (большой радиус = худшая точность)
 html = patch(html, '<option value="maxAccuracy">Maximum accuracy radius</option>',
                    '<option value="maxAccuracy">Coordinate precision (largest radius = worst)</option>')
+
+# --- Переименование проекта (предложение коллег, раунд 2) ---
+html = patch(html, '<title>Loess database interactive map — accuracy circles</title>',
+                   '<title>Цифровой атлас геологических разрезов и палеоархивов</title>')
+html = patch(html, '<h1>Loess database interactive map</h1>',
+                   '<h1>Цифровой атлас геологических разрезов и палеоархивов</h1>\n'
+                   '      <div style="margin-top:4px"><a href="upload.html" '
+                   'style="color:#9ec9ff;font-size:12px">+ Загрузить публикацию</a></div>')
+
+# --- #1 коллег: детальная подложка при приближении (Physical пропадает вблизи -> Carto Voyager с дорогами/подписями на крупном масштабе) ---
+html = patch(html, 'popupCloser.onclick = function() {',
+    '''const detailLayer = new ol.layer.Tile({ visible: false, zIndex: 6,
+  source: new ol.source.XYZ({ url: "https://{a-c}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
+    attributions: "&copy; CARTO &copy; OpenStreetMap contributors", crossOrigin: "anonymous" }) });
+map.addLayer(detailLayer);
+// У Esri World Physical тайлы заканчиваются на 8-м уровне (дальше «Map data not yet available»),
+// что соответствует разрешению ~611 м/пиксель. Считаем именно по разрешению: getZoom() при плавном
+// зуме колесом бывает дробным или неопределённым, и сравнение по номеру уровня подводит.
+const DETAIL_RES = 611;
+function _updateDetail(){
+  try {
+    const res = map.getView().getResolution();
+    const phys = baseLayers.physical && baseLayers.physical.getVisible();
+    detailLayer.setVisible(!!phys && res < DETAIL_RES);   // подробная — только вблизи и только под физической
+  } catch (e) { /* подложка не должна ломать остальную карту */ }
+}
+map.on("moveend", _updateDetail);                      // срабатывает после любого зума и сдвига
+map.getView().on("change:resolution", _updateDetail);  // и сразу в процессе зума, без ожидания конца
+const _bmSel = document.getElementById("basemapSelect");
+if (_bmSel) _bmSel.addEventListener("change", _updateDetail);
+_updateDetail();
+
+popupCloser.onclick = function() {''')
 
 # #2 попап: индикатор обоснованности + цитата-обоснование (ручная проверка аномалий — просьба коллег)
 html = patch(html,
@@ -364,22 +458,40 @@ html = patch(html,
 html = patch(html,
     '''    ${(m.publications && m.publications.length) ? `<div><b>Publication</b><br>${escapeHtml(m.publications[0])}</div>` : ""}''',
     '''    ${(m.publications && m.publications.length) ? `<div><b>Publication</b><br>${escapeHtml(m.publications[0])}</div>` : ""}
-    ${(m.evidence && m.evidence.length) ? `<div style="margin-top:8px"><b>Source phrase (for verification)</b><br>${m.evidence.map(e => `<span class="subtle">• ${escapeHtml(e)}</span>`).join("<br>")}</div>` : ""}''')
+    ${m.unitWarn ? `<div style="margin-top:8px;background:#fff8e6;border:1px solid #f0e0b8;border-radius:6px;padding:7px 9px;font-size:12px">
+      <b>Требует проверки.</b> Название объекта совпадает с названием стратиграфического подразделения
+      (например, «борисоглебский лёсс»). Возможно, в публикации речь о слое, а не об отдельном разрезе.</div>` : ""}
+    ${(m.records && m.records.length > 1) ? `<div style="margin-top:8px"><b>Сведения по источникам</b>
+      <div class="subtle" style="margin-bottom:3px">данные из разных публикаций не смешаны</div>
+      ${m.records.map(r => { const pub = (r.pubs && r.pubs.length) ? r.pubs[0] : "источник не указан";
+        const th = [["изученная",r.thStudied],["видимая",r.thVisible],["скважина",r.thBorehole],["без уточнения",r.thUnspec]]
+          .filter(x=>x[1]&&x[1]!="ND").map(x=>`${x[0]} ${escapeHtml(x[1])} м`).join(", ");
+        const bits = [r.depositRaw!="ND"?escapeHtml(r.depositRaw):"", th,
+                      r.stratRaw!="ND"?escapeHtml(r.stratRaw):"",
+                      r.datingRaw!="ND"?"датирование: "+escapeHtml(r.datingRaw):"",
+                      r.typeExcavationRaw!="ND"?escapeHtml(r.typeExcavationRaw):""].filter(Boolean);
+        return `<div style="border-left:3px solid #dfe3e8;padding:3px 0 3px 8px;margin-top:4px">
+          <div style="font-size:12px">${escapeHtml(pub.replace(/\\.pdf$/i,"").slice(0,60))}</div>
+          <div class="subtle">${bits.join(" · ") || "без числовых данных"}</div></div>`; }).join("")}
+      </div>` : ""}
+    ${(m.pageLinks && m.pageLinks.length) ? `<div style="margin-top:6px"><b>Страница в скане</b> <span class="subtle">(номер — открыть скан)</span><br>${m.pageLinks.map(pl => { const t = pl.src.replace(/\\.pdf$/i,""); const sp = pl.scanPages || []; return `<span class="subtle">• ${escapeHtml(t.slice(0,48))}: стр. ${pl.pages.map(p => sp.indexOf(p) >= 0 ? `<a href="#" onclick="showScan('${escapeHtml(pl.scanSlug)}',${p},[${sp.join(",")}],'${escapeHtml(t.slice(0,40)).replace(/'/g,"")}',event)" style="color:#2563eb;font-weight:600">${p}</a>` : p).join(", ")}${pl.approx?" ≈":""}</span>`; }).join("<br>")}</div>` : ""}
+    ${(m.evidence && m.evidence.length) ? `<div style="margin-top:8px"><b>Фрагменты публикации — основания (${m.evidence.length})</b><div style="max-height:190px;overflow-y:auto;margin-top:4px">${m.evidence.map(e => `<span class="subtle">• ${escapeHtml(e)}</span>`).join("<br>")}</div></div>` : ""}''')
 
 # v2: геоморфопозиция (после Excavation type — теперь реального)
 html = patch(html,
     '''      <div class="popup-key">Excavation type</div><div>${joinVals(m.typeExcavation)}</div>''',
     '''      <div class="popup-key">Excavation type</div><div>${joinVals(m.typeExcavation)}</div>
-      <div class="popup-key">Geomorphic position</div><div>${(m.geomPositions && m.geomPositions.length) ? escapeHtml(m.geomPositions.join("; ")) : "ND"}</div>''')
+      <div class="popup-key">Geomorphic position</div><div>${(m.geomPositions && m.geomPositions.length) ? (function(s){return escapeHtml(s.length>220?s.slice(0,220)+"…":s)})(m.geomPositions.join("; ")) : "ND"}</div>''')
 # v2: дословные термины отложений (для проверки лёсс/лёссовидный/покровный)
 html = patch(html,
     '''      <div class="popup-key">Deposit type</div><div>${joinVals(m.depositType)}</div>''',
     '''      <div class="popup-key">Deposit type</div><div>${joinVals(m.depositType)}</div>
-      <div class="popup-key">Deposit (source terms)</div><div>${(m.rawTerms && m.rawTerms.length) ? escapeHtml(m.rawTerms.join("; ")) : "ND"}</div>''')
+      <div class="popup-key">Deposit (source terms)</div><div>${(m.rawTerms && m.rawTerms.length) ? (function(s){return escapeHtml(s.length>220?s.slice(0,220)+"…":s)})(m.rawTerms.join("; ")) : "ND"}</div>
+      <div class="popup-key">Data source</div><div>${(m.sourceKinds && m.sourceKinds.length) ? escapeHtml(m.sourceKinds.join(", ")) : "ND"}</div>''')
 # v2: мощность по типам (изученная / видимая / глубина скважины)
 html = patch(html,
     '''      <div class="popup-key">Thickness / depth</div><div>${thicknessText}</div>''',
-    '''      <div class="popup-key">Thickness / depth</div><div>${[["studied",m.thStudied],["visible",m.thVisible],["borehole",m.thBorehole],["general",m.thUnspec]].filter(x=>x[1]&&x[1]!="ND").map(x=>`${x[0]}: ${escapeHtml(x[1])} m`).join("<br>") || thicknessText}</div>''')
+    '''      <div class="popup-key">Мощность и глубина</div><div>${[["Изученная толща",m.thStudied],["Видимая в обнажении",m.thVisible],["Глубина скважины/расчистки",m.thBorehole],["Тип не указан",m.thUnspec]].filter(x=>x[1]&&x[1]!="ND").map(x=>`<span class="subtle">${x[0]}:</span> ${escapeHtml(x[1])} м`).join("<br>") || thicknessText}</div>''')
 
 # === ВЕРИФИКАЦИЯ (ручная проверка данных) — кнопки в карточке + вызов Cloud Function fn_verify ===
 # VERIFY_API пустой -> фоллбэк на localStorage (демо). Заполнить URL функции после её деплоя.
@@ -432,9 +544,143 @@ function vfBlock(sid){
 function showPopup(m, coordinate) {'''.replace("__VERIFY_API__", VERIFY_API_URL)
 html = patch(html, 'function showPopup(m, coordinate) {', VERIFY_JS)
 html = patch(html, 'overlay.setPosition(coordinate);',
-             'overlay.setPosition(coordinate);\n  popupContent.innerHTML += vfBlock(m.markerId);\n  loadVerify(m.markerId);')
+             'overlay.setPosition(coordinate);\n  _curMarker = m;\n'
+             '  popupContent.innerHTML += vfBlock(m.markerId);\n  loadVerify(m.markerId);')
 
-open(os.path.join(HERE, "index.html"), "w", encoding="utf-8").write(html)
+# === ПРОСМОТР ИСХОДНОГО СКАНА (запрос коллег: как «Поиск по архивам» — видеть страницу источника) ===
+SCAN_JS = '''const SCAN_BASE = "https://storage.yandexcloud.net/loess-map/scans/";
+let scanCur = null;
+
+/* ---- подсветка фраз-оснований на скане ----
+   Координаты строк посчитаны по той же картинке, что показываем, поэтому переводим их
+   в проценты — тогда подсветка держится при любом масштабе окна. */
+function _nrm(s){ return String(s||"").toLowerCase().replace(/ё/g,"е").replace(/[^0-9a-zа-я]+/g," ").trim(); }
+
+function _matchLines(lines, phrases){
+  const hit = [];
+  const ph = phrases.map(_nrm).filter(p => p.length >= 12);
+  if (!ph.length) return hit;
+  lines.forEach((L, i) => {
+    const t = _nrm(L[0]);
+    if (t.length < 4) return;
+    const lt = t.split(" ").filter(w => w.length >= 4);
+    const ts = new Set(t.split(" "));
+    for (const p of ph) {
+      if (t.indexOf(p) >= 0) { hit.push(i); return; }                    // цитата целиком внутри строки
+      if (t.length >= 12 && p.indexOf(t) >= 0) { hit.push(i); return; }  // строка внутри длинной цитаты
+      const pt = p.split(" ").filter(w => w.length >= 4);
+      if (pt.length >= 2) {                                              // бо́льшая часть слов цитаты в строке
+        const c = pt.filter(w => ts.has(w)).length;
+        if (c >= 2 && c / pt.length >= 0.6) { hit.push(i); return; }
+      }
+      if (lt.length >= 2) {                                              // и наоборот — строка покрыта цитатой
+        const ps = new Set(p.split(" "));
+        const c = lt.filter(w => ps.has(w)).length;
+        if (c >= 2 && c / lt.length >= 0.6) { hit.push(i); return; }
+      }
+    }
+  });
+  return hit;
+}
+
+async function _drawHighlights(slug, page){
+  const box = document.getElementById("scan-marks");
+  if (!box) return;
+  box.innerHTML = "";
+  const phrases = (scanCur && scanCur.phrases) || [];
+  if (!phrases.length) return;
+  try {
+    const url = SCAN_BASE + encodeURIComponent(slug) + "/p" + page + ".lines.json";
+    const d = await (await fetch(url)).json();
+    if (!d || !d.w || !d.h) return;
+    const idx = _matchLines(d.lines || [], phrases);
+    idx.forEach(i => {
+      const [, x0, y0, x1, y1] = d.lines[i];
+      const m = document.createElement("div");
+      m.style.cssText = "position:absolute;background:rgba(255,214,0,.35);border:1px solid rgba(214,160,0,.85);" +
+        "border-radius:2px;pointer-events:none;" +
+        `left:${x0 / d.w * 100}%;top:${y0 / d.h * 100}%;` +
+        `width:${(x1 - x0) / d.w * 100}%;height:${(y1 - y0) / d.h * 100}%;`;
+      box.appendChild(m);
+    });
+    const cap = document.getElementById("scan-hint");
+    if (cap) cap.textContent = idx.length ? `подсвечено фрагментов: ${idx.length}`
+                                          : "фрагменты на этой странице не распознались дословно";
+  } catch (e) { /* нет файла с координатами — просто показываем скан без подсветки */ }
+}
+
+let _curMarker = null;                    // объект, чья карточка сейчас открыта — из него берём фразы
+const BTN = "padding:4px 9px;cursor:pointer;border-radius:5px;border:1px solid #56646f;background:#2c3742;color:#e8edf2";
+
+function showScan(slug, page, pages, title, ev) {
+  if (ev) ev.preventDefault();
+  const phrases = (_curMarker && _curMarker.evidence) || [];
+  // page — текущая страница скана; pages — страницы, где нашлись фразы объекта (по ним быстрый переход)
+  scanCur = { slug: slug, pages: pages, page: page, title: title, phrases: phrases, rot: 0 };
+  let box = document.getElementById("scan-box");
+  if (!box) {
+    box = document.createElement("div"); box.id = "scan-box";
+    box.style.cssText = "position:fixed;inset:0;background:rgba(15,18,22,.92);z-index:9999;display:flex;" +
+      "flex-direction:column;align-items:center;justify-content:center;padding:14px";
+    box.onclick = e => { if (e.target === box) closeScan(); };
+    box.innerHTML =
+      '<div style="color:#e8edf2;font:13px sans-serif;margin-bottom:8px;display:flex;gap:8px;' +
+      'align-items:center;flex-wrap:wrap;justify-content:center;max-width:95vw">' +
+      `<button onclick="stepPage(-1)" style="${BTN}" title="предыдущая страница">\\u2039 стр.</button>` +
+      '<span id="scan-cap" style="text-align:center"></span>' +
+      `<button onclick="stepPage(1)" style="${BTN}" title="следующая страница">стр. \\u203a</button>` +
+      `<button onclick="rotScan()" style="${BTN}" title="повернуть">\\u21bb</button>` +
+      `<button onclick="closeScan()" style="${BTN}" title="закрыть">\\u2715</button></div>` +
+      '<div id="scan-chips" style="margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;justify-content:center"></div>' +
+      '<div id="scan-wrap" style="position:relative;display:inline-block;line-height:0;transition:transform .15s">' +
+      '<img id="scan-img" style="max-width:95vw;max-height:78vh;background:#fff;box-shadow:0 6px 30px rgba(0,0,0,.5)">' +
+      '<div id="scan-marks" style="position:absolute;inset:0;pointer-events:none"></div></div>' +
+      '<div id="scan-hint" style="color:#9fb0c0;font:12px sans-serif;margin-top:6px"></div>';
+    document.body.appendChild(box);
+    document.getElementById("scan-img").onerror = function () {
+      const h = document.getElementById("scan-hint");
+      if (h) h.textContent = "эта страница не оцифрована — вернитесь к страницам с находками";
+    };
+    document.addEventListener("keydown", e => {
+      const b = document.getElementById("scan-box");
+      if (!b || b.style.display === "none") return;
+      if (e.key === "Escape") closeScan();
+      if (e.key === "ArrowLeft") stepPage(-1);
+      if (e.key === "ArrowRight") stepPage(1);
+      if (e.key.toLowerCase() === "r") rotScan();
+    });
+  }
+  box.style.display = "flex";
+  renderScan();
+}
+
+function renderScan() {
+  const c = scanCur; if (!c) return;
+  const marks = document.getElementById("scan-marks");
+  if (marks) marks.innerHTML = "";
+  const hint = document.getElementById("scan-hint");
+  if (hint) hint.textContent = "";
+  document.getElementById("scan-img").src = SCAN_BASE + encodeURIComponent(c.slug) + "/p" + c.page + ".jpg";
+  const own = c.pages.indexOf(c.page);
+  document.getElementById("scan-cap").textContent =
+    c.title + " \\u2014 стр. " + c.page + (own < 0 ? " (соседняя)" : "");
+  // быстрый переход к страницам, где нашлись фразы объекта
+  const chips = document.getElementById("scan-chips");
+  if (chips) chips.innerHTML = c.pages.map(p =>
+    `<button onclick="goPage(${p})" style="${BTN};` +
+    (p === c.page ? "background:#3d6b52;border-color:#4e8a68" : "") + `">${p}</button>`).join("");
+  document.getElementById("scan-wrap").style.transform = "rotate(" + c.rot + "deg)";
+  _drawHighlights(c.slug, c.page);
+}
+
+function stepPage(d) { if (scanCur && scanCur.page + d >= 1) { scanCur.page += d; renderScan(); } }
+function goPage(p) { if (scanCur) { scanCur.page = p; renderScan(); } }
+function rotScan() { if (scanCur) { scanCur.rot = (scanCur.rot + 180) % 360; renderScan(); } }
+function closeScan() { const b = document.getElementById("scan-box"); if (b) b.style.display = "none"; }
+function showPopup(m, coordinate) {'''
+html = patch(html, 'function showPopup(m, coordinate) {', SCAN_JS)
+
+open(os.path.join(OUT_DIR, "index.html"), "w", encoding="utf-8").write(html)
 kb = len(html.encode("utf-8")) / 1024
 print(f"index.html (дизайн заказчика): маркеров {len(DATA)}, записей {rid}, дублей-групп {dup}, {kb:.0f} КБ")
 print("CATEGORIES:", {k: len(v) for k, v in CATEGORIES.items()})
