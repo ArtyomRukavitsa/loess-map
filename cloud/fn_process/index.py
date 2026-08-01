@@ -165,19 +165,44 @@ SYS = ("Ты — извлекатель научных данных по лёс�
        "На каждое поле — КОРОТКАЯ цитата evidence (до ~20 слов, не копируй абзацы); нет основания -> 'ND'/[]. Не выдумывать. Координаты не извлекать. "
        "Названия кириллицей. Стадии -> Lower/Middle/Upper Pleistocene/Holocene. Нет разреза -> records: [].")
 
-def extract_page(text):
+MAX_TOK = int(os.environ.get("MAX_TOKENS", 12000))
+
+
+def extract_page(text, span=6000, depth=0):
+    """Извлечение из куска текста с делением при обрыве ответа.
+
+    На каждое поле модель обязана привести цитату-основание, поэтому плотная страница (список
+    радиоуглеродных дат, стратиграфическая таблица) раздувает ответ. При нехватке лимита он
+    обрывается посреди строки, JSON не разбирается — и публикация целиком уходила в ошибку
+    «Unterminated string». Так терялись как раз самые содержательные работы.
+
+    Поэтому: запас по лимиту и, если ответ всё же оборвался, тот же текст обрабатывается двумя
+    половинами. Делим текст, а не увеличиваем лимит до бесконечности: длина ответа определяется
+    плотностью данных, и заранее её не угадать."""
     if not text or len(text.strip()) <= 200: return []
     m = CYCLE[next(_rr) % len(CYCLE)]
+    chunk = text[:span]
     try:
         with MODEL_SEM[m]:
-            resp = http(LLM, {"model": f"gpt://{FOLDER}/{m}/latest", "temperature": 0, "max_tokens": 5000,
+            resp = http(LLM, {"model": f"gpt://{FOLDER}/{m}/latest", "temperature": 0, "max_tokens": MAX_TOK,
                               "messages": [{"role": "system", "content": SYS},
-                                           {"role": "user", "content": f'Фрагмент:\n"""\n{text[:6000]}\n"""\nИзвлеки записи.'}],
+                                           {"role": "user", "content": f'Фрагмент:\n"""\n{chunk}\n"""\nИзвлеки записи.'}],
                               "response_format": {"type": "json_schema",
                                                   "json_schema": {"name": "recs", "strict": True, "schema": SCHEMA}}},
                         "POST", 180)
-        c = json.loads(resp).get("choices", [{}])[0].get("message", {}).get("content")
-        return json.loads(c).get("records", []) if c else []
+        d = json.loads(resp)
+        c = d.get("choices", [{}])[0].get("message", {}).get("content")
+        if not c: return []
+        try:
+            return json.loads(c).get("records", [])
+        except json.JSONDecodeError:
+            if depth >= 2 or len(chunk) < 900:
+                raise
+            half = len(chunk) // 2
+            cut = chunk.rfind("\n", 0, half) or half        # режем по строке, а не посреди слова
+            print(f"ответ оборвался, делю кусок {len(chunk)} -> {cut}+{len(chunk)-cut}", flush=True)
+            return (extract_page(chunk[:cut], cut, depth + 1)
+                    + extract_page(chunk[cut:], len(chunk) - cut, depth + 1))
     except Exception as e:
         # Ошибки считаем: если модель не ответила НИ РАЗУ, это не «разрезов нет», а сбой — и он должен быть виден
         with _err_lock: _err["n"] += 1; _err["last"] = str(e)[:150]
@@ -216,22 +241,40 @@ SETTLE = {"city", "town", "village", "hamlet", "municipality", "administrative",
           "borough", "isolated_dwelling", "locality", "quarter"}
 GC_KEY = "caches/geocache_upload.json"
 
-def geocode(name, admin, cache):
-    key = name + "|" + (admin or "")
-    if key in cache: return cache[key]
-    res = None
+def _nominatim(q_text):
     try:
-        q = urllib.parse.urlencode({"q": name + (", " + admin if admin else ""), "format": "json",
-                                    "limit": 5, "countrycodes": CIS})
-        r = urllib.request.Request("https://nominatim.openstreetmap.org/search?" + q, headers={"User-Agent": UA})
+        q = urllib.parse.urlencode({"q": q_text, "format": "json", "limit": 5, "countrycodes": CIS})
+        r = urllib.request.Request("https://nominatim.openstreetmap.org/search?" + q,
+                                   headers={"User-Agent": UA})
         for it in json.load(urllib.request.urlopen(r, timeout=30)):
             if it.get("class") in ("place", "boundary") and it.get("type") in SETTLE:
                 la, lo = float(it["lat"]), float(it["lon"])
-                if 41 <= la <= 82 and 19 <= lo <= 180: res = [la, lo]; break
+                if 41 <= la <= 82 and 19 <= lo <= 180: return [la, lo]
     except Exception:
-        res = None
+        pass
+    finally:
+        time.sleep(1.05)
+    return None
+
+
+def geocode(name, admin, cache):
+    """Сначала с уточнением, потом без него.
+
+    В «административную единицу» модель кладёт то, что написано в статье, а там сплошь и рядом
+    неформальные области: «Центральная Якутия», «Костенковско-Боршевский район». В справочнике
+    таких нет, и запрос «Амга, Центральная Якутия» возвращает пусто, хотя просто «Амга» находится
+    сразу. Из-за этого целые статьи давали предложения без координат — то есть невидимые на карте.
+
+    Отступать к голому названию рискованно: тёзки. Поэтому результат такого поиска помечаем,
+    чтобы проверяющий видел, что уточнение не подтверждено, и чтобы дальнейшая обработка
+    (уточнение по региону и реке) знала, к чему приглядеться."""
+    key = name + "|" + (admin or "")
+    if key in cache: return cache[key]
+    res = _nominatim(name + (", " + admin if admin else ""))
+    if res is None and admin:
+        bare = _nominatim(name)
+        if bare: res = bare + ["по названию без уточнения"]
     cache[key] = res
-    time.sleep(1.05)
     return res
 
 # ---------------- сборка предложений ----------------
@@ -335,6 +378,9 @@ def process(jid):
     for i, p in enumerate(props):
         c = geocode(p["locality"], None if p["admin"] == "ND" else p["admin"], cache)
         p["lat"], p["lon"] = (c[0], c[1]) if c else (None, None)
+        # третий элемент появляется, когда точку нашли по голому названию: уточнение из статьи
+        # справочнику неизвестно, поэтому возможен тёзка — проверяющему это надо видеть
+        if c and len(c) > 2: p["geo_note"] = c[2]
         p["i"] = i
     s3_put(GC_KEY, cache)
     s3_put(f"{PREFIX}{jid}/proposals.json", props)
