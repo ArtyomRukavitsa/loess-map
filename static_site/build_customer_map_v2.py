@@ -35,6 +35,9 @@ KINDF = os.path.join(DATA_DIR, "object_kind.json")
 # Что именно описано в публикации — главная сложность по мнению геолога: «конкретная выработка,
 # сводный разрез, стратиграфическое подразделение или регион в целом». Определено моделью по цитатам.
 OBJKIND = json.load(open(KINDF, encoding="utf-8")) if os.path.exists(KINDF) else {}
+# Двухуровневая структура «сводный разрез ↔ входящие площадки» (просьба геолога, п.3)
+LINKF = os.path.join(DATA_DIR, "object_links.json")
+LINKS = json.load(open(LINKF, encoding="utf-8")) if os.path.exists(LINKF) else {}
 COLF = os.path.join(DATA_DIR, "column_data.json")
 # Данные со стратиграфических колонок. Привязываем СТРОГО ПО СТРАНИЦЕ: колонка извлечена
 # с конкретной страницы конкретной публикации, а у нас уже есть точная связь объект→публикация→страница.
@@ -419,6 +422,9 @@ for (lat, lon), recs in groups.items():
         "locUncertain": loc_unc, "unitWarn": unit_warn,
         "objLevel": obj_level, "excIds": _excids, "objWhy": obj_why,
         "objectKind": [obj_level or "не определено"],
+        "partOf": (LINKS.get(f"{lat},{lon}") or {}).get("partOf", ""),
+        "includes": (LINKS.get(f"{lat},{lon}") or {}).get("includes", []),
+        "excavationIds": (LINKS.get(f"{lat},{lon}") or {}).get("excavations", []),
         "elevDem": DEM.get((round(lat, 5), round(lon, 5))),  # расчётная высота (DEM), если нет опубликованной
         "confidence": conf,
         "pageLinks": _pl, "columns": _cols,          # страницы источника + данные со стратиграфических колонок
@@ -548,6 +554,13 @@ html = patch(html,
           <span class="subtle">· стр. ${c.page}</span></div>
         ${c.units && c.units.length ? `<div class="subtle">${escapeHtml(c.units.join(", "))}</div>` : ""}
       </div>`).join("")}</div>` : ""}
+    ${(m.includes && m.includes.length) ? `<div style="margin-top:8px"><b>Входящие площадки</b>
+      <div class="subtle" style="margin-bottom:3px">сводный разрез обобщает эти объекты</div>
+      ${m.includes.map(x => `<div>• <a href="#" onclick="flyTo(${JSON.stringify(x.at)},event)"
+        style="color:#2563eb;font-weight:600">${escapeHtml(x.name)}</a></div>`).join("")}</div>` : ""}
+    ${m.partOf ? `<div style="margin-top:8px"><b>Входит в сводный разрез</b><br>${escapeHtml(m.partOf)}</div>` : ""}
+    ${(m.excavationIds && m.excavationIds.length) ? `<div style="margin-top:6px"><b>Выработки на площадке</b>
+      <div class="subtle">${escapeHtml(m.excavationIds.join(", "))}</div></div>` : ""}
     ${m.unitWarn ? `<div style="margin-top:8px;background:#fff8e6;border:1px solid #f0e0b8;border-radius:6px;padding:7px 9px;font-size:12px">
       <b>Требует проверки.</b> Название объекта совпадает с названием стратиграфического подразделения
       (например, «борисоглебский лёсс»). Возможно, в публикации речь о слое, а не об отдельном разрезе.</div>` : ""}
@@ -564,7 +577,7 @@ html = patch(html,
           <div style="font-size:12px">${escapeHtml(pub.replace(/\\.pdf$/i,"").slice(0,60))}</div>
           <div class="subtle">${bits.join(" · ") || "без числовых данных"}</div></div>`; }).join("")}
       </div>` : ""}
-    ${(m.pageLinks && m.pageLinks.length) ? `<div style="margin-top:6px"><b>Страница в скане</b> <span class="subtle">(номер — открыть скан)</span><br>${m.pageLinks.map(pl => { const t = pl.src.replace(/\\.pdf$/i,""); const sp = pl.scanPages || []; return `<span class="subtle">• ${escapeHtml(t.slice(0,48))}: стр. ${pl.pages.map(p => sp.indexOf(p) >= 0 ? `<a href="#" onclick="showScan('${escapeHtml(pl.scanSlug)}',${p},[${sp.join(",")}],'${escapeHtml(t.slice(0,40)).replace(/'/g,"")}',event)" style="color:#2563eb;font-weight:600">${p}</a>` : p).join(", ")}${pl.approx?" ≈":""}</span>`; }).join("<br>")}</div>` : ""}
+    ${(m.pageLinks && m.pageLinks.length) ? `<div style="margin-top:6px"><b>Страница в скане</b> <span class="subtle">(номер — открыть скан)</span><br>${m.pageLinks.map(pl => { const t = pl.src.replace(/\\.pdf$/i,""); const sp = pl.scanPages || []; return `<span class="subtle">• ${escapeHtml(t.slice(0,48))}: стр. ${pl.pages.map(p => sp.indexOf(p) >= 0 ? `<a href="#" onclick="showScan('${escapeHtml(String(pl.scanSlug).replace(/'/g,""))}',${p},[${sp.join(",")}],'${escapeHtml(t.slice(0,40).replace(/'/g,""))}',event)" style="color:#2563eb;font-weight:600">${p}</a>` : p).join(", ")}${pl.approx?" ≈":""}</span>`; }).join("<br>")}</div>` : ""}
     ${(m.evidence && m.evidence.length) ? `<div style="margin-top:8px"><b>Фрагменты публикации — основания (${m.evidence.length})</b><div style="max-height:190px;overflow-y:auto;margin-top:4px">${m.evidence.map(e => `<span class="subtle">• ${escapeHtml(e)}</span>`).join("<br>")}</div></div>` : ""}''')
 
 # v2: геоморфопозиция (после Excavation type — теперь реального)

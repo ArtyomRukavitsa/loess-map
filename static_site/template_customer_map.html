@@ -362,25 +362,29 @@ function hashIndex(value) {
   for (let i=0; i<s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
   return Math.abs(h) % palette.length;
 }
+const NO_DATA = "#9ca3af";                 // «нет данных» — всегда серый, ни в одной шкале
+// Градиент по числовой шкале. «ND» намеренно исключён из расчёта позиции: он стоит последним
+// в списке классов, и раньше indexOf возвращал для него максимальный индекс — точки с НЕИЗВЕСТНОЙ
+// высотой красились в цвет САМОЙ БОЛЬШОЙ. 85% карты читалось ровно наоборот.
+function rampColor(value, cats, ramp) {
+  const arr = (cats || []).filter(v => v !== "ND");
+  const idx = arr.indexOf(value);
+  if (idx < 0) return NO_DATA;             // ND и любое незнакомое значение
+  return ramp[Math.min(ramp.length-1, Math.floor(idx * (ramp.length-1) / Math.max(1, arr.length-1)))];
+}
 function colorFor(value, styleBy) {
-  if (!value) return "#9ca3af";
-  if (styleBy === "accuracy") return accuracyColors[value] || "#9ca3af";
-  if (styleBy === "elevation") {
-    const arr = CATEGORIES.elevationRanges || [];
-    const idx = Math.max(0, arr.indexOf(value));
-    return sequential[Math.min(sequential.length-1, Math.floor(idx * (sequential.length-1) / Math.max(1, arr.length-1)))];
-  }
-  if (styleBy === "thickness") {
-    const arr = CATEGORIES.thicknessRanges || [];
-    const idx = Math.max(0, arr.indexOf(value));
-    return sequentialWarm[Math.min(sequentialWarm.length-1, Math.floor(idx * (sequentialWarm.length-1) / Math.max(1, arr.length-1)))];
-  }
+  if (!value || value === "ND") return NO_DATA;
+  if (styleBy === "accuracy") return accuracyColors[value] || NO_DATA;
+  if (styleBy === "elevation") return rampColor(value, CATEGORIES.elevationRanges, sequential);
+  if (styleBy === "thickness") return rampColor(value, CATEGORIES.thicknessRanges, sequentialWarm);
   if (styleBy === "chronologicalData") {
     if (value === "Yes") return "#16a34a";
     if (value === "No") return "#dc2626";
     return "#9ca3af";
   }
-  return palette[hashIndex(value)];
+  const arr = CATEGORIES[styleBy] || [];        // цвет по позиции в списке, а не по хешу:
+  const i = arr.indexOf(value);                 // иначе «loess» и «loess-like loam» совпадали
+  return i >= 0 ? palette[i % palette.length] : palette[hashIndex(value)];
 }
 function markerStyleValue(m) {
   const styleBy = document.getElementById("styleBy").value;
@@ -388,7 +392,10 @@ function markerStyleValue(m) {
   if (styleBy === "thickness") return m.representativeThicknessRange || "ND";
   if (styleBy === "accuracy") return m.representativeAccuracyRange || "ND";
   if (styleBy === "typeExcavation") return (m.typeExcavation || [])[0] || "ND";
-  if (styleBy === "depositType") return (m.depositType || [])[0] || "ND";
+  if (styleBy === "depositType") {
+    const d = m.depositType || [];               // не алфавит, а предмет базы: лёсс важнее
+    return d.find(v => v === "loess") || d.find(v => /^loess/i.test(v)) || d[0] || "ND";
+  }
   if (styleBy === "stratigraphicPosition") return (m.stratigraphicPosition || [])[0] || "ND";
   if (styleBy === "chronologicalData") return (m.chronologicalData || [])[0] || "ND";
   return "ND";
@@ -637,6 +644,15 @@ function onlyRealSections() {
     cb.checked = (cb.value === "конкретная выработка" || cb.value === "сводный разрез");
   });
   updateMap();
+}
+// Переход к связанному объекту: сводный разрез -> входящая площадка и обратно
+function flyTo(markerId, ev) {
+  if (ev) ev.preventDefault();
+  const m = DATA.find(x => x.markerId === markerId);
+  if (!m) return;
+  const c = ol.proj.fromLonLat([m.lon, m.lat]);
+  map.getView().animate({center: c, zoom: Math.max(map.getView().getZoom(), 13), duration: 400});
+  showPopup(m, c);
 }
 function setGroup(group, checked) {
   document.querySelectorAll(`input[data-group="${group}"]`).forEach(cb => cb.checked = checked);
