@@ -20,7 +20,8 @@ CAND_KEY = "crawl/candidates.json"
 UPLOADS = "uploads/"
 LIST_PER_RUN = int(os.environ.get("LIST_PER_RUN", 400))
 FETCH_PER_RUN = int(os.environ.get("FETCH_PER_RUN", 40))
-DELAY = float(os.environ.get("DELAY", 1.0))          # вежливая пауза между запросами к источнику
+DELAY = float(os.environ.get("DELAY", 2.0))          # пауза между запросами: при 1 с источник
+                                                     # начинает отдавать пустые страницы
 TIME_BUDGET = int(os.environ.get("TIME_BUDGET", 780))
 LAST_PAGE = int(os.environ.get("LAST_PAGE", 3531))
 RUBRIC = "https://cyberleninka.ru/article/c/earth-and-related-environmental-sciences"
@@ -28,8 +29,10 @@ ART = "https://cyberleninka.ru/article/n/"
 UA = "loess-atlas/1.0 (research project, Institute of Geography RAS; danik.khromov@icloud.com)"  # только латиница: заголовки HTTP не принимают кириллицу
 CHUNK = 5000                                          # текст режем на куски — извлекатель работает по фрагментам
 
-_t0 = time.time()
-def left(): return TIME_BUDGET - (time.time() - _t0)
+# Отсчёт ведём от НАЧАЛА ВЫЗОВА, а не от загрузки модуля: облако переиспользует
+# «тёплый» контейнер, и при общем счётчике бюджет со второго вызова уже исчерпан.
+_t0 = [time.time()]
+def left(): return TIME_BUDGET - (time.time() - _t0[0])
 
 s3 = boto3.client("s3", endpoint_url="https://storage.yandexcloud.net", region_name="ru-central1",
                   aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
@@ -45,10 +48,25 @@ def s3_put(key, obj):
 
 def log(*a): print(*a, flush=True)
 
+# Полный набор заголовков как у браузера: на «голый» запрос из облака сайт отдаёт пустую страницу
+# (оболочка с аналитикой, но без списка статей), хотя с обычной машины всё приходит целиком.
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "identity",
+    "Referer": "https://cyberleninka.ru/",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin", "Sec-Fetch-User": "?1",
+    "Connection": "keep-alive",
+}
+
 def http(url, tries=4):
     for a in range(tries):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": UA})
+            req = urllib.request.Request(url, headers=HEADERS)
             with urllib.request.urlopen(req, timeout=60) as r:
                 return r.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as e:
@@ -190,14 +208,35 @@ def step(state, cand):
     page = state.get("page", 1)
 
     # Фаза 1 — перечисление: заголовок и аннотация есть прямо в списке, поэтому отсев бесплатный
-    listed = 0
+    listed, blanks = 0, 0
     while page <= LAST_PAGE and listed < LIST_PER_RUN and left() > 90:
         try:
             items = parse_list(http(f"{RUBRIC}/{page}"))
         except Exception as e:
             log(f"страница списка {page}: {str(e)[:80]}"); break
         if not items:
-            page = LAST_PAGE + 1; break
+            # Пустая оболочка вместо списка — признак ограничения частоты: при непрерывном обходе
+            # источник начинает так отвечать, хотя одиночный запрос той же страницы проходит.
+            # Поэтому сначала ЖДЁМ И ПОВТОРЯЕМ ту же страницу: пропуск стоит 20 потерянных статей.
+            for wait in (8, 20):
+                if left() < wait + 30: break
+                time.sleep(wait)
+                try:
+                    items = parse_list(http(f"{RUBRIC}/{page}"))
+                except Exception:
+                    items = []
+                if items: break
+        if not items:
+            blanks += 1
+            stats["blank"] = stats.get("blank", 0) + 1
+            state["last_error"] = f"страница {page}: пустой ответ (пропущена)"
+            log(state["last_error"])
+            page += 1; listed += 1
+            if blanks >= 5:
+                state["last_error"] = f"подряд {blanks} пустых страниц — останавливаюсь"
+                log(state["last_error"]); break
+            time.sleep(DELAY); continue
+        blanks = 0
         stats["listed"] += len(items)
         for it in items:
             if relevant(it["title"], it["abstract"]):
@@ -228,6 +267,7 @@ def step(state, cand):
     return state, cand
 
 def handler(event, context):
+    _t0[0] = time.time()          # бюджет времени — на этот вызов
     body = {}
     raw = (event or {}).get("body")
     if raw:
@@ -241,11 +281,25 @@ def handler(event, context):
         state, cand = {}, []
         s3_put(STATE_KEY, state); s3_put(CAND_KEY, cand)
 
+    if body.get("debug"):        # что источник реально отдаёт функции — вёрстка у всех разная по IP
+        pg = int(body.get("page", 1))
+        try:
+            h = http(f"{RUBRIC}/{pg}")
+            info = {"ok": True, "length": len(h), "items": len(parse_list(h)),
+                    "links_article_n": h.count("/article/n/"),
+                    "has_title_div": 'class="title"' in h,
+                    "head": h[:400], "tail": h[-300:]}
+        except Exception as e:
+            info = {"ok": False, "error": str(e)[:300]}
+        return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
+                "body": json.dumps(info, ensure_ascii=False)}
+
     if body.get("status"):
         return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
                 "body": json.dumps({"page": state.get("page", 1), "last_page": LAST_PAGE,
                                     "candidates": len(cand), "fetched": state.get("fetched_idx", 0),
-                                    "stats": state.get("stats", {})}, ensure_ascii=False)}
+                                    "stats": state.get("stats", {}),
+                                    "last_error": state.get("last_error", "")}, ensure_ascii=False)}
 
     state, cand = step(state, cand)
     state["updated"] = int(time.time())

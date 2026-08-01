@@ -31,6 +31,19 @@ for _k, _v in _acc.items():
         pass
 PLF = os.path.join(DATA_DIR, "page_links_v2.json")
 PAGELINKS = json.load(open(PLF, encoding="utf-8")) if os.path.exists(PLF) else {}  # {"lat,lon": [{src,pages,approx}]}
+KINDF = os.path.join(DATA_DIR, "object_kind.json")
+# Что именно описано в публикации — главная сложность по мнению геолога: «конкретная выработка,
+# сводный разрез, стратиграфическое подразделение или регион в целом». Определено моделью по цитатам.
+OBJKIND = json.load(open(KINDF, encoding="utf-8")) if os.path.exists(KINDF) else {}
+COLF = os.path.join(DATA_DIR, "column_data.json")
+# Данные со стратиграфических колонок. Привязываем СТРОГО ПО СТРАНИЦЕ: колонка извлечена
+# с конкретной страницы конкретной публикации, а у нас уже есть точная связь объект→публикация→страница.
+# Привязка по названию не годится — «Колотова балка» склеивалась с любой «балкой».
+COLS = {k: v for k, v in (json.load(open(COLF, encoding="utf-8")) if os.path.exists(COLF) else {}).items()
+        if v.get("has_column")}
+ROTF = os.path.join(DATA_DIR, "rotated_pages.json")
+_rot = json.load(open(ROTF, encoding="utf-8")) if os.path.exists(ROTF) else {}
+ROTPUB = _rot.get("publications", {})   # {slug публикации: угол} — книги, отсканированные боком целиком
 SCF = os.path.join(DATA_DIR, "scan_index.json")
 SCANIDX = json.load(open(SCF, encoding="utf-8")) if os.path.exists(SCF) else {}    # {публикация: {страница: ключ}}
 
@@ -41,6 +54,34 @@ def scan_slug(name):                       # тот же slug, что у 60_rend
     import hashlib
     base = _re.sub(r"[^0-9A-Za-zА-Яа-яЁё]+", "_", name.rsplit(".", 1)[0]).strip("_")[:52]
     return f"{base}_{hashlib.md5(name.encode('utf-8')).hexdigest()[:6]}"
+
+# Замечание геолога: смешиваются конкретные горные выработки и сводные (обобщённые) разрезы.
+# Обозначения выработок («скв. I», «обн. 6», «шурф 9/96») уже есть в цитатах — достаём их оттуда.
+# Отдельными точками их не показать: собственных координат у скважин в тексте нет.
+EXC_ID_RE = _re.compile(
+    r"(скв(?:ажин\w*|\.)?\s*№?\s*[\dIVX][\d/IVX]{0,4}"
+    r"|шурф\w*\s*№?\s*\d[\d/]{0,4}"
+    r"|расчистк\w*\s*№?\s*\d[\d/]{0,4}"
+    r"|обн(?:ажени\w*|\.)\s*№?\s*\d[\d/]{0,3}"
+    r"|разрез\s*№\s*\d[\d/]{0,3}"
+    r"|Site\s*\d{1,3}"
+    r"|[A-Z]{2}-\d{2}[A-Z\d\-]{0,6})", _re.I)
+SUMMARY_RE = _re.compile(r"(сводн\w+\s+(?:разрез|колонк)|обобщённ\w+\s+разрез|обобщенн\w+\s+разрез"
+                         r"|типов\w+\s+разрез|опорн\w+\s+разрез)", _re.I)
+_YEAR_RE = _re.compile(r"\b(1[89]\d{2}|20[0-3]\d)\b")
+
+def exc_ids(phrases):
+    out, seen = [], set()
+    for p in phrases:
+        for m in EXC_ID_RE.finditer(p):
+            v = _re.sub(r"\s+", " ", m.group(0)).strip(" .,;")
+            if _YEAR_RE.search(v): continue          # «скв.1974» — это год, а не номер выработки
+            # ключ без падежных окончаний: «расчистка 217» и «расчистки 217» — одно и то же
+            word, num = _re.match(r"([^\d]*)(.*)", v.lower()).groups()
+            key = (_re.sub(r"[^a-zа-я]", "", word)[:5], num.strip())
+            if key in seen: continue
+            seen.add(key); out.append(v)
+    return out[:12]
 
 # «борисоглебский лёсс», «армавирская свита» — названия подразделений, образованные от топонимов
 UNIT_RE = _re.compile(r"([А-ЯЁ][а-яё]+ск)(?:ий|ая|ое|ого|ой|ом|ую)\s+"
@@ -55,6 +96,9 @@ def _stem(s):
 def _same_stem(title, unit):
     a, b = _stem(title), _stem(unit)
     return len(a) >= 5 and len(b) >= 5 and (a[:6] == b[:6])
+
+def _col_norm(s):                          # для сверки названия разреза на рисунке с названием объекта
+    return _re.sub(r"[^0-9a-zа-я]+", " ", str(s or "").lower().replace("ё", "е")).strip()
 
 def with_scans(lst):                       # к привязке страниц добавляем те, для которых есть отрендеренный скан
     out = []
@@ -231,7 +275,8 @@ for r in list(ws.values)[1:]:
 
 DATA = []
 cat = {k: set() for k in ("typeExcavation", "depositType", "stratigraphicPosition", "datingMethod",
-                          "chronologicalData", "elevationRanges", "thicknessRanges", "accuracyRanges")}
+                          "chronologicalData", "elevationRanges", "thicknessRanges", "accuracyRanges",
+                          "objectKind")}
 for (lat, lon), recs in groups.items():
     def uni(key):
         s = []
@@ -288,6 +333,37 @@ for (lat, lon), recs in groups.items():
     # Замечание геолога: многие стратиграфические подразделения названы по населённым пунктам
     # («борисоглебский лёсс»), и упоминание такого названия ещё не значит, что там описан разрез.
     # Помечаем случай, когда имя объекта совпадает с названием подразделения — решает проверяющий.
+    # Колонки цепляем по ДВУМ признакам сразу: страница (объект на неё ссылается) И название разреза
+    # на рисунке. Одной страницы мало — на ней часто рисунок про СОСЕДНИЙ разрез: у «Араповичей»
+    # так подхватилось «Посевкино». Одного названия тоже мало — склеивало «Колотову балку» с «балкой».
+    _pl = with_scans(PAGELINKS.get(f"{lat},{lon}", []))
+    _cols, _seen_col = [], set()
+    _locs = [_col_norm(x) for x in localities if len(_col_norm(x)) >= 4]
+    for e in _pl:
+        sl = e.get("scanSlug") or scan_slug(UPLOAD_MARK.sub("", e["src"]))
+        for p in e["pages"]:
+            c = COLS.get(f"{sl}/p{p}")
+            if not c: continue
+            cname = _col_norm(c.get("section_name", ""))
+            if not any(l in cname or cname in l for l in _locs): continue   # рисунок про другой разрез
+            key = (c.get("section_name", ""), tuple(c.get("stratigraphic_units") or []))
+            if key in _seen_col: continue
+            _seen_col.add(key)
+            _cols.append({"page": p, "name": c.get("section_name", ""),
+                          "exc": c.get("excavation_id", ""),
+                          "units": (c.get("stratigraphic_units") or [])[:16]})
+    _cols = _cols[:4]
+    # Что именно описано: берём разбор модели по цитатам, регулярки оставляем запасным вариантом.
+    # Модель различает то, чего шаблоны не видят: «Заводское» выглядит селом, а речь о толще вообще.
+    _excids = exc_ids(mev_all)
+    _kind = OBJKIND.get(f"{lat},{lon}") or {}
+    obj_kind = _kind.get("kind", "")
+    obj_why = _kind.get("why", "")
+    if obj_kind:
+        obj_level = obj_kind
+    else:
+        obj_level = "сводный разрез" if SUMMARY_RE.search(" ".join(mev_all)) else \
+                    ("конкретные выработки" if _excids else "")
     _unit = UNIT_RE.search(" ".join(mev_all))
     unit_warn = bool(_unit) and _same_stem(localities[0] if localities else "", _unit.group(1))
     loc_unc = any(r.get("_locconf") == "uncertain" for r in recs)  # надёжность ЛОКАЦИИ (отдельная ось)
@@ -341,15 +417,18 @@ for (lat, lon), recs in groups.items():
         "searchText": search,
         "evidence": mev_all, "grounded": mgrounded,
         "locUncertain": loc_unc, "unitWarn": unit_warn,
+        "objLevel": obj_level, "excIds": _excids, "objWhy": obj_why,
+        "objectKind": [obj_level or "не определено"],
         "elevDem": DEM.get((round(lat, 5), round(lon, 5))),  # расчётная высота (DEM), если нет опубликованной
         "confidence": conf,
-        "pageLinks": with_scans(PAGELINKS.get(f"{lat},{lon}", [])),  # разрез -> страница (+ссылка на скан)
+        "pageLinks": _pl, "columns": _cols,          # страницы источника + данные со стратиграфических колонок
     }
     DATA.append(m)
     for t in excT: cat["typeExcavation"].add(t)
     for t in dep or ["ND"]: cat["depositType"].add(t)
     for t in strat or ["ND"]: cat["stratigraphicPosition"].add(t)
     for t in dat or ["ND"]: cat["datingMethod"].add(t)
+    cat["objectKind"].add(obj_level or "не определено")
     for t in (chrono or ["No"]): cat["chronologicalData"].add(t)
     for t in elevRanges: cat["elevationRanges"].add(t)
     for t in thickRanges: cat["thicknessRanges"].add(t)
@@ -361,6 +440,10 @@ CATEGORIES = {
     "stratigraphicPosition": order_by(cat["stratigraphicPosition"], ORD_STR),
     "datingMethod": order_by(cat["datingMethod"], ORD_DAT),
     "chronologicalData": order_by(cat["chronologicalData"], ["No", "Yes"]),
+    # порядок = от самого ценного (реальная точка) к самому размытому
+    "objectKind": order_by(cat["objectKind"], ["конкретная выработка", "сводный разрез",
+                                               "стратиграфическое подразделение", "регион в целом",
+                                               "неясно", "не определено"]),
     "elevationRanges": sorted(cat["elevationRanges"], key=bin_lo),
     "thicknessRanges": sorted(cat["thicknessRanges"], key=bin_lo),
     "accuracyRanges": order_by(cat["accuracyRanges"],
@@ -458,6 +541,13 @@ html = patch(html,
 html = patch(html,
     '''    ${(m.publications && m.publications.length) ? `<div><b>Publication</b><br>${escapeHtml(m.publications[0])}</div>` : ""}''',
     '''    ${(m.publications && m.publications.length) ? `<div><b>Publication</b><br>${escapeHtml(m.publications[0])}</div>` : ""}
+    ${(m.columns && m.columns.length) ? `<div style="margin-top:8px"><b>Со стратиграфической колонки</b>
+      <div class="subtle" style="margin-bottom:3px">прочитано с рисунка в публикации, обозначения приведены как в оригинале</div>
+      ${m.columns.map(c => `<div style="border-left:3px solid #cfe0d5;padding:2px 0 2px 8px;margin-top:3px">
+        <div style="font-size:12px">${escapeHtml(c.name || "разрез")}${c.exc ? " · выработка " + escapeHtml(c.exc) : ""}
+          <span class="subtle">· стр. ${c.page}</span></div>
+        ${c.units && c.units.length ? `<div class="subtle">${escapeHtml(c.units.join(", "))}</div>` : ""}
+      </div>`).join("")}</div>` : ""}
     ${m.unitWarn ? `<div style="margin-top:8px;background:#fff8e6;border:1px solid #f0e0b8;border-radius:6px;padding:7px 9px;font-size:12px">
       <b>Требует проверки.</b> Название объекта совпадает с названием стратиграфического подразделения
       (например, «борисоглебский лёсс»). Возможно, в публикации речь о слое, а не об отдельном разрезе.</div>` : ""}
@@ -481,6 +571,12 @@ html = patch(html,
 html = patch(html,
     '''      <div class="popup-key">Excavation type</div><div>${joinVals(m.typeExcavation)}</div>''',
     '''      <div class="popup-key">Excavation type</div><div>${joinVals(m.typeExcavation)}</div>
+      ${m.objLevel ? `<div class="popup-key">Что описано</div><div>${escapeHtml(m.objLevel)}${
+        m.objLevel === "регион в целом" ? ' <span class="subtle">— речь о территории, а не о точке</span>' :
+        m.objLevel === "сводный разрез" ? ' <span class="subtle">— обобщение по нескольким выработкам</span>' :
+        m.objLevel === "стратиграфическое подразделение" ? ' <span class="subtle">— название слоя, не разрез</span>' : ""}${
+        m.objWhy ? `<div class="subtle">${escapeHtml(m.objWhy)}</div>` : ""}</div>` : ""}
+      ${(m.excIds && m.excIds.length) ? `<div class="popup-key">Выработки в источнике</div><div>${escapeHtml(m.excIds.join(", "))}</div>` : ""}
       <div class="popup-key">Geomorphic position</div><div>${(m.geomPositions && m.geomPositions.length) ? (function(s){return escapeHtml(s.length>220?s.slice(0,220)+"…":s)})(m.geomPositions.join("; ")) : "ND"}</div>''')
 # v2: дословные термины отложений (для проверки лёсс/лёссовидный/покровный)
 html = patch(html,
@@ -549,6 +645,9 @@ html = patch(html, 'overlay.setPosition(coordinate);',
 
 # === ПРОСМОТР ИСХОДНОГО СКАНА (запрос коллег: как «Поиск по архивам» — видеть страницу источника) ===
 SCAN_JS = '''const SCAN_BASE = "https://storage.yandexcloud.net/loess-map/scans/";
+// Публикации, отсканированные боком целиком — разворачиваем сразу. Отдельные страницы не трогаем:
+// в журналах широкие рисунки печатают повёрнутыми, и такая страница сама по себе нормальная.
+const SCAN_ROT = __SCAN_ROT__;
 let scanCur = null;
 
 /* ---- подсветка фраз-оснований на скане ----
@@ -615,27 +714,38 @@ const BTN = "padding:4px 9px;cursor:pointer;border-radius:5px;border:1px solid #
 function showScan(slug, page, pages, title, ev) {
   if (ev) ev.preventDefault();
   const phrases = (_curMarker && _curMarker.evidence) || [];
+  // Угол: сначала выбор пользователя (он сохраняется), иначе — определённый для всей публикации
+  let rot = 0;
+  try { const s = localStorage.getItem("scanrot:" + slug); if (s !== null) rot = parseInt(s, 10) || 0; }
+  catch (e) {}
+  if (!rot && SCAN_ROT[slug]) rot = SCAN_ROT[slug];
   // page — текущая страница скана; pages — страницы, где нашлись фразы объекта (по ним быстрый переход)
-  scanCur = { slug: slug, pages: pages, page: page, title: title, phrases: phrases, rot: 0 };
+  scanCur = { slug: slug, pages: pages, page: page, title: title, phrases: phrases, rot: ((rot % 360) + 360) % 360 };
   let box = document.getElementById("scan-box");
   if (!box) {
     box = document.createElement("div"); box.id = "scan-box";
     box.style.cssText = "position:fixed;inset:0;background:rgba(15,18,22,.92);z-index:9999;display:flex;" +
-      "flex-direction:column;align-items:center;justify-content:center;padding:14px";
+      "flex-direction:column;align-items:center;justify-content:center;padding:76px 14px 14px;overflow:hidden";
     box.onclick = e => { if (e.target === box) closeScan(); };
     box.innerHTML =
-      '<div style="color:#e8edf2;font:13px sans-serif;margin-bottom:8px;display:flex;gap:8px;' +
-      'align-items:center;flex-wrap:wrap;justify-content:center;max-width:95vw">' +
+      // панель закреплена поверх картинки: повёрнутый скан занимает место по-старому и иначе накрывает кнопки
+      '<div style="position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:10001;' +
+      'background:rgba(20,26,32,.94);border-radius:8px;padding:6px 10px;' +
+      'color:#e8edf2;font:13px sans-serif;display:flex;gap:8px;' +
+      'align-items:center;flex-wrap:wrap;justify-content:center;max-width:96vw">' +
       `<button onclick="stepPage(-1)" style="${BTN}" title="предыдущая страница">\\u2039 стр.</button>` +
       '<span id="scan-cap" style="text-align:center"></span>' +
       `<button onclick="stepPage(1)" style="${BTN}" title="следующая страница">стр. \\u203a</button>` +
       `<button onclick="rotScan()" style="${BTN}" title="повернуть">\\u21bb</button>` +
       `<button onclick="closeScan()" style="${BTN}" title="закрыть">\\u2715</button></div>` +
-      '<div id="scan-chips" style="margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;justify-content:center"></div>' +
+      '<div id="scan-chips" style="position:fixed;top:48px;left:50%;transform:translateX(-50%);z-index:10001;' +
+      'display:flex;gap:6px;flex-wrap:wrap;justify-content:center;max-width:96vw"></div>' +
       '<div id="scan-wrap" style="position:relative;display:inline-block;line-height:0;transition:transform .15s">' +
       '<img id="scan-img" style="max-width:95vw;max-height:78vh;background:#fff;box-shadow:0 6px 30px rgba(0,0,0,.5)">' +
       '<div id="scan-marks" style="position:absolute;inset:0;pointer-events:none"></div></div>' +
-      '<div id="scan-hint" style="color:#9fb0c0;font:12px sans-serif;margin-top:6px"></div>';
+      '<div id="scan-hint" style="position:fixed;bottom:8px;left:50%;transform:translateX(-50%);' +
+      'z-index:10001;color:#9fb0c0;font:12px sans-serif;background:rgba(20,26,32,.8);' +
+      'border-radius:6px;padding:3px 9px"></div>';
     document.body.appendChild(box);
     document.getElementById("scan-img").onerror = function () {
       const h = document.getElementById("scan-hint");
@@ -669,15 +779,25 @@ function renderScan() {
   if (chips) chips.innerHTML = c.pages.map(p =>
     `<button onclick="goPage(${p})" style="${BTN};` +
     (p === c.page ? "background:#3d6b52;border-color:#4e8a68" : "") + `">${p}</button>`).join("");
+  // при повороте на 90/270 меняем ограничения местами, иначе картинка вылезает за экран
+  const img = document.getElementById("scan-img"), side = (c.rot === 90 || c.rot === 270);
+  img.style.maxWidth = side ? "72vh" : "94vw";
+  img.style.maxHeight = side ? "88vw" : "72vh";
   document.getElementById("scan-wrap").style.transform = "rotate(" + c.rot + "deg)";
   _drawHighlights(c.slug, c.page);
 }
 
 function stepPage(d) { if (scanCur && scanCur.page + d >= 1) { scanCur.page += d; renderScan(); } }
 function goPage(p) { if (scanCur) { scanCur.page = p; renderScan(); } }
-function rotScan() { if (scanCur) { scanCur.rot = (scanCur.rot + 180) % 360; renderScan(); } }
+function rotScan() {                       // шаг 90°, выбор запоминается для этой публикации
+  if (!scanCur) return;
+  scanCur.rot = (scanCur.rot + 90) % 360;
+  try { localStorage.setItem("scanrot:" + scanCur.slug, String(scanCur.rot)); } catch (e) {}
+  renderScan();
+}
 function closeScan() { const b = document.getElementById("scan-box"); if (b) b.style.display = "none"; }
 function showPopup(m, coordinate) {'''
+SCAN_JS = SCAN_JS.replace("__SCAN_ROT__", json.dumps(ROTPUB, ensure_ascii=False))
 html = patch(html, 'function showPopup(m, coordinate) {', SCAN_JS)
 
 open(os.path.join(OUT_DIR, "index.html"), "w", encoding="utf-8").write(html)

@@ -35,7 +35,7 @@ def log(*a): print(*a, flush=True)
 
 # ---------- 1. данные карты из бакета во временную папку ----------
 DATA_FILES = ["records_clean_geo_v2.xlsx", "section_evidence.json", "dem_elevation.json",
-              "accuracy_radius.json", "page_links_v2.json", "scan_index.json",
+              "accuracy_radius.json", "page_links_v2.json", "scan_index.json", "rotated_pages.json", "column_data.json", "object_kind.json",
               "merged_uploads.json", "template.html"]
 
 def pull_data():

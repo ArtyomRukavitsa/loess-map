@@ -20,8 +20,10 @@ CHUNK = int(os.environ.get("CHUNK", 40))
 MAX_PAGES = int(os.environ.get("MAX_PAGES", 400))
 DPI = int(os.environ.get("OCR_DPI", 180))
 TIME_BUDGET = int(os.environ.get("TIME_BUDGET", 2400))       # с; дальше сохраняемся и выходим (продолжит следующий запуск)
-_t0 = time.time()
-def left(): return TIME_BUDGET - (time.time() - _t0)
+# Отсчёт ведём от НАЧАЛА ВЫЗОВА, а не от загрузки модуля: облако переиспользует
+# «тёплый» контейнер, и при общем счётчике бюджет со второго вызова уже исчерпан.
+_t0 = [time.time()]
+def left(): return TIME_BUDGET - (time.time() - _t0[0])
 
 s3 = boto3.client("s3", endpoint_url="https://storage.yandexcloud.net", region_name="ru-central1",
                   aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
@@ -361,6 +363,7 @@ CORS = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET
         "Access-Control-Allow-Headers": "Content-Type"}
 
 def handler(event, context):
+    _t0[0] = time.time()          # бюджет времени — на этот вызов
     # функцию вызывают и триггеры (там httpMethod нет), и кнопка со страницы — второй случай требует CORS
     if str((event or {}).get("httpMethod") or "").upper() == "OPTIONS":
         return {"statusCode": 200, "headers": {**CORS, "Content-Type": "application/json"},
