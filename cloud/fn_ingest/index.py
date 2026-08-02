@@ -61,6 +61,60 @@ def handler(event, context):
             items.sort(key=lambda x: x[1], reverse=True)
             jobs = [j for j in (_get(k) for k, _ in items[:50]) if j]
             return _resp(200, {"jobs": jobs})
+        if action == "queue":
+            # Очередь целиком, с отбором и перелистыванием.
+            # Прежний action=jobs обрезал список на 50 последних: из 826 задач остальные 776 были
+            # недостижимы — к ним не вело ни кнопки, ни адреса. Поднять лимит нельзя, каждая задача
+            # это отдельное обращение к хранилищу (50 штук — 7.6 с, все 826 — две минуты).
+            # Поэтому читаем готовый указатель (data/queue_index.json, собирает 77_build_queue_index.py):
+            # одно обращение вместо восьмисот, отбор и сортировка — уже в памяти.
+            idx = _get("data/queue_index.json", {}) or {}
+            rows = idx.get("jobs", [])
+            if not rows:
+                # Указателя нет или он пуст — отдаём хотя бы последние задачи, собрав их напрямую.
+                # Пустая очередь выглядела бы как «работы нет», и проверяющий просто ушёл бы.
+                items = []
+                tok = None
+                while True:
+                    kw = {"Bucket": BUCKET, "Prefix": PREFIX, "MaxKeys": 1000}
+                    if tok: kw["ContinuationToken"] = tok
+                    r = s3.list_objects_v2(**kw)
+                    items += [(o["Key"], o["LastModified"]) for o in r.get("Contents", [])
+                              if o["Key"].endswith("/status.json")]
+                    tok = r.get("NextContinuationToken")
+                    if not r.get("IsTruncated"): break
+                items.sort(key=lambda x: x[1], reverse=True)
+                for k, _ in items[:50]:
+                    st = _get(k) or {}
+                    rows.append({"id": st.get("job_id", k.split("/")[1]),
+                                 "name": st.get("filename", ""), "status": st.get("status", "?"),
+                                 "n": st.get("n_proposals", 0) or 0, "geo": 0, "checked": 0,
+                                 "src": st.get("user", ""), "url": st.get("url", ""),
+                                 "created": st.get("created", 0), "msg": st.get("msg", "")})
+            total_all = len(rows)
+            q_text = (q.get("q") or "").strip().lower()
+            if q_text:
+                rows = [r for r in rows if q_text in str(r.get("name", "")).lower()]
+            status = (q.get("status") or "").strip()
+            if status:
+                keep = set(status.split(","))
+                rows = [r for r in rows if r.get("status") in keep]
+            if q.get("found") == "1":              # только там, где есть что проверять
+                rows = [r for r in rows if r.get("n", 0) > 0]
+            if q.get("geo") == "1":                # только там, где есть координаты
+                rows = [r for r in rows if r.get("geo", 0) > 0]
+            if q.get("todo") == "1":               # ещё не разобранные до конца
+                rows = [r for r in rows if r.get("n", 0) > r.get("checked", 0)]
+            order = q.get("sort") or "n"
+            keyf = {"n": lambda r: -r.get("n", 0), "geo": lambda r: -r.get("geo", 0),
+                    "new": lambda r: -r.get("created", 0), "name": lambda r: str(r.get("name", ""))}
+            rows = sorted(rows, key=keyf.get(order, keyf["n"]))
+            try: offset = max(0, int(q.get("offset") or 0))
+            except ValueError: offset = 0
+            try: limit = min(200, max(1, int(q.get("limit") or 25)))
+            except ValueError: limit = 25
+            return _resp(200, {"total": len(rows), "total_all": total_all, "built": idx.get("built", 0),
+                               "offset": offset, "limit": limit, "jobs": rows[offset:offset + limit]})
         if action == "job":                        # статус + предложения + решения одной задачи
             jid = _safe_job(q.get("job_id", ""))
             if not jid: return _resp(400, {"error": "job_id required"})
